@@ -1347,15 +1347,15 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
         xs[i] += gp[gi].x[di]*img[im].rotMat[di][i];
       }
     }
-    if(fabs(xs[0])>pixelSize*nsupsamppix || fabs(xs[1])>pixelSize*nsupsamppix){
+    /* Add a ray for each grid point, excluding those in the supersampled region */ 
+    if(fabs(xs[0])>pixelSize*(nsupsamppix/2.0) || fabs(xs[1])>pixelSize*(nsupsamppix/2.0)){
       assignRayOnImage(xs, pixelSize, imgCentreXPixels, imgCentreYPixels, img, im, maxNumRaysPerPixel, rays, &numActiveRaysInternal);
       }
-} /* End loop 1, over grid points. */
+  } /* End loop 1, over grid points. */
 
-  /* Add extra rays for the central pixels */
+  /* Add extra rays for the supersampled central pixels */
   for (pixshiftx = (pixoff - nsupsamppix) / 2; pixshiftx <= (nsupsamppix - pixoff - pixoff2) / 2; pixshiftx++) {
     for (pixshifty = (pixoff - nsupsamppix) / 2; pixshifty <= (nsupsamppix - pixoff - pixoff2) / 2; pixshifty++) {
-      // Subtract the central rays from the supersampled pixels by setting them back to zero
       xi = pixshiftx + (img[im].pxls - pixoff) / 2;
       yi = pixshifty + (img[im].pxls - pixoff) / 2;
       ppi = yi * img[im].pxls + xi;
