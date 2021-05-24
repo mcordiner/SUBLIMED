@@ -344,12 +344,14 @@ Copy over user-set parameters to the configInfo versions. (This seems like dupli
   par->traceRayAlgorithm = inpars.traceRayAlgorithm;
   par->resetRNG          = inpars.resetRNG;
   par->doSolveRTE        = inpars.doSolveRTE;
-  par->Qwater            = inpars.Qwater;
+  par->Q1                = inpars.Q1;
+  par->Q2                = inpars.Q2;
   par->rHelio            = inpars.rHelio;
   par->xne               = inpars.xne;
   par->colliScale        = inpars.colliScale;
   par->girScale          = inpars.girScale;
   par->useEP             = inpars.useEP;
+  par->openAngle         = inpars.openAngle;
 
   /* Somewhat more carefully copy over the strings:
   */
@@ -474,8 +476,16 @@ exit(1);
       if(!silent) bail_out("You must define the sinkPoints parameter.");
 exit(1);
     }
-    if (par->Qwater<=0){
-      if(!silent) bail_out("You must define the Qwater parameter.");
+    if (par->Q1<=0){
+      if(!silent) bail_out("You must define the Q1 parameter.");
+exit(1);
+    }
+    if (par->Q2<=0){
+      if(!silent) bail_out("You must define the Q2 parameter.");
+exit(1);
+    }
+    if (par->openAngle<=0){
+      if(!silent) bail_out("You must define the openAngle parameter.");
 exit(1);
     }
     if (par->rHelio<=0){
@@ -1064,6 +1074,31 @@ void _printTestGridOutput(struct grid *gp, const int id, const int i, const int 
 }
 
 /*....................................................................*/
+void mapSubGrid(struct grid *subgp, struct grid *gp, int subncell, int ncell){
+  int i, j;
+  for(i=0;i<subncell;i++)
+        for(j=0;j<ncell;j++)
+          if(gp[j].id==subgp[i].id){
+            gp[j] = subgp[i];
+            break;
+          }
+}
+/*....................................................................*/
+void initializeGrid(struct grid *gp, int ncell, molData *md, int nSpecies){
+  int gi,si,ei;
+
+  for(gi=0;gi<ncell;gi++)
+      for(si=0;si<nSpecies;si++){
+        gp[gi].mol[si].specNumDens = malloc(sizeof(double)*md[si].nlev);
+        gp[gi].mol[si].pops        = malloc(sizeof(double)*md[si].nlev);
+        for(ei=0;ei<md[si].nlev;ei++){
+          gp[gi].mol[si].specNumDens[ei] = 0.0;
+          gp[gi].mol[si].pops[ei] = 0.0;
+        }
+      }
+}
+
+/*....................................................................*/
 int
 run(inputPars inpars, image *inimg, const int nImages){
   /* Run LIME with inpars and the output fits files specified.
@@ -1072,13 +1107,16 @@ run(inputPars inpars, image *inimg, const int nImages){
      programs. In this case, inpars and img must be specified by the
      external program.
   */
-  int i,gi,si,ei,status=0,sigactionStatus=0;
+  int i,j,gi,si,ei,status=0,sigactionStatus=0;
+  int gp1_ncell=0, gp2_ncell;
   int initime=time(0);
   int popsdone=0,nExtraSolverIters=0;
   molData *md=NULL;
   configInfo par;
   imageInfo *img=NULL;
   struct grid *gp=NULL;
+  struct grid *gp1=NULL;
+  struct grid *gp2=NULL;
   char message[STR_LEN_0];
   int nEntries=0;
   double *lamtab=NULL,*kaptab=NULL;
@@ -1160,7 +1198,7 @@ exit(1);
         writeFitsAllUnits(i, &par, img);
       }
     }
-  }
+  } 
 
   if(par.doMolCalcs){
     if(!popsdone){
@@ -1170,25 +1208,123 @@ exit(1);
     if(par.useAbun)
       calcGridMolDensities(&par, &gp);
 
-    for(gi=0;gi<par.ncell;gi++){
-      for(si=0;si<par.nSpecies;si++){
-        gp[gi].mol[si].specNumDens = malloc(sizeof(double)*md[si].nlev);
-        gp[gi].mol[si].pops        = malloc(sizeof(double)*md[si].nlev);
-        for(ei=0;ei<md[si].nlev;ei++){
-          gp[gi].mol[si].specNumDens[ei] = 0.0;
-          gp[gi].mol[si].pops[ei] = 0.0;
-        }
-      }
+    initializeGrid(gp,par.ncell,md,par.nSpecies);
+
+    /*Here we will subdivide gp into two subgrids: gp1 and gp2. gp1 corresponds to the grid points inside the solid angle specified by par.openAngle, and gp2 stores those outside of it.
+    This subdivision is done so that each region can be run separately, each with its own physical parameters
+    */
+
+    int gp1_pIntensity=0, gp2_pIntensity;
+    int gp_pIntensity = par.pIntensity;
+    int gp1Counter = -1, gp2Counter = -1;
+    double b,angle;
+    //We make a copy of the ncell and useEP parameters given that we might need to change them certain points, but will later need to know their original values.
+    int gp_ncell = par.ncell;
+    int gp_useEP = par.useEP; 
+
+    //Counting how many cells in gp fall inside par.openAngle
+    for(i=0;i<par.ncell;i++){
+      b = sqrt(gp[i].x[0]*gp[i].x[0]+gp[i].x[1]*gp[i].x[1]);
+      angle = atan2(b,-gp[i].x[2]);
+      if(angle<par.openAngle)
+        gp1_ncell++;
+    }
+
+    //Any cells that didn't fall inside the openAngle (i.e the gp1 region), are by default in the region outside it (i.e the gp2 region)
+    gp2_ncell = gp_ncell - gp1_ncell;
+
+    //We repeat the process to determine the pIntensity parameter for each region, given that ncell is not always equal to pIntensity
+    for(i=0;i<gp_pIntensity;i++){
+      b = sqrt(gp[i].x[0]*gp[i].x[0]+gp[i].x[1]*gp[i].x[1]);
+      angle = atan2(b,-gp[i].x[2]);
+      if(angle<par.openAngle)
+        gp1_pIntensity++;
+    }
+
+    gp2_pIntensity = gp_pIntensity - gp1_pIntensity;
+
+    //Initializing and setting default values for each region
+    mallocAndSetDefaultGrid(&gp1, (size_t)gp1_ncell, (size_t)par.nSpecies);
+    mallocAndSetDefaultGrid(&gp2, (size_t)gp2_ncell, (size_t)par.nSpecies);
+    initializeGrid(gp1,gp1_ncell,md,par.nSpecies);
+    initializeGrid(gp2,gp2_ncell,md,par.nSpecies);
+
+    //Mapping gp cells to its corresponding subgrid
+    for(i=0;i<par.ncell;i++){
+      b = sqrt(gp[i].x[0]*gp[i].x[0]+gp[i].x[1]*gp[i].x[1]);
+      angle = atan2(b,-gp[i].x[2]);
+      if(angle<par.openAngle)
+        gp1[++gp1Counter] = gp[i];
+      else
+        gp2[++gp2Counter] = gp[i];
     }
 
     if(par.doSolveRTE){
-      gridPopsInit(&par,md,gp);
-      nExtraSolverIters = levelPops(md, &par, gp, &popsdone, lamtab, kaptab, nEntries);
+      if(par.useEP==2) par.useEP = 0;  //In order to carry out the full JBar calculation ,we need the whole grid (i.e. both gp1 and gp2) to be populated. This is because ther Jbar calculation looks for neighboring grid points, which might fall on either side of the openANgle when we are close to its edges. Therefore, we change par.useEP=2 to 0 temporarilly, so that we can do one iteration without photon trapping, and then use those initial populations for the Jbar calculation in subsequent iterations
+      
+      //Since par.ncell and par.pIntensity are used inside levelPops, we chang their value before each call to match the parameters of the gp region being passed to the function
+      par.ncell = gp1_ncell;
+      par.pIntensity = gp1_pIntensity;
+
+      //Calculating level pops for subgrid correponding to the interior of the open angle
+      gridPopsInit(&par,md,gp1); 
+      nExtraSolverIters = levelPops(md, &par, gp1, &popsdone, lamtab, kaptab, nEntries,gp,gp_pIntensity,gp_ncell);
+      calcGridMolSpecNumDens(&par,md,gp1);
+
+      par.ncell = gp2_ncell;
+      par.pIntensity = gp2_pIntensity;
+
+      //Calculating level pops for subgrid correponding to the outside of the open angle
+      gridPopsInit(&par,md,gp2);
+      nExtraSolverIters = levelPops(md, &par, gp2, &popsdone, lamtab, kaptab, nEntries,gp,gp_pIntensity,gp_ncell);
+      calcGridMolSpecNumDens(&par,md,gp2);
+
+      //Setting them back to their original values
+      par.pIntensity = gp_pIntensity;
+      par.ncell = gp_ncell;
+
+      //Mapping each sub grid to the full (gp) grip
+      mapSubGrid(gp1,gp,gp1_ncell,par.ncell);
+      mapSubGrid(gp2,gp,gp2_ncell,par.ncell);
+
+      calcGridMolSpecNumDens(&par,md,gp);
+
+      if(gp_useEP==2){
+
+        par.useEP = 2; //Now that the populations have been initialized for the whole grid, we proceed to the iterate performing thre full 3D photon trapping
+
+        int nItersDone = par.nSolveItersDone;
+
+        while(nItersDone < par.nSolveIters){ 
+          printf("ITER %d / %d\n", nItersDone+1,par.nSolveIters);
+
+          par.ncell = gp1_ncell;
+          par.pIntensity = gp1_pIntensity;
+
+          nExtraSolverIters = levelPops(md, &par, gp1, &popsdone, lamtab, kaptab, nEntries,gp,gp_pIntensity,gp_ncell);
+          calcGridMolSpecNumDens(&par,md,gp2);
+
+          par.ncell = gp2_ncell;
+          par.pIntensity = gp2_pIntensity;
+
+          nExtraSolverIters = levelPops(md, &par, gp2, &popsdone, lamtab, kaptab, nEntries,gp,gp_pIntensity,gp_ncell);
+          calcGridMolSpecNumDens(&par,md,gp2);
+
+          mapSubGrid(gp1,gp,gp1_ncell,gp_ncell);
+          mapSubGrid(gp2,gp,gp2_ncell,gp_ncell);
+
+          nItersDone++;
+        }
+      }
+
     }
 
+    par.pIntensity = gp_pIntensity;
+    par.ncell = gp_ncell;
+     
     calcGridMolSpecNumDens(&par,md,gp);
-
     par.nSolveItersDone += nExtraSolverIters;
+    if(par.outputfile != NULL) popsout(&par,gp,md);
   }
 
   if(onlyBitsSet(par.dataFlags & DS_mask_all_but_mag, DS_mask_3))
@@ -1201,6 +1337,8 @@ exit(1);
   }
 
   freeSomeGridFields((unsigned int)par.ncell, (unsigned short)par.nSpecies, gp);
+  free(gp1);
+  free(gp2);
 
   /* Now make the line images.
   */
