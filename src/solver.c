@@ -834,8 +834,17 @@ getTransitionRates(molData *md, int ispec, struct grid *gp, int id, configInfo *
   
   /*GENERATE ELECTRON COLLISIONAL RATES (only for gas 0) AND ADD TO MATRIX*/
   /*Formalism of Zakharov et al. (2007)*/
-   Te = Telec(radius,par->Qwater,gp[id].t[0]);
-   ne = nelec(radius,par->Qwater,vexp,Te,par->rHelio,par->xne);
+   double b = sqrt(gp[id].x[0]*gp[id].x[0]+gp[id].x[1]*gp[id].x[1]);
+   double angle = atan2(b,-gp[id].x[2]);
+   double Qwater;
+
+   if(angle<par->openAngle)
+    Qwater = par->Q1;
+  else
+    Qwater = par->Q2;
+
+   Te = Telec(radius,Qwater,gp[id].t[0]); 
+   ne = nelec(radius,Qwater,vexp,Te,par->rHelio,par->xne); 
    
    for(iline=0;iline<md[ispec].nline;iline++){
      aij = HPLANCK*md[ispec].freq[iline]/2./KBOLTZ/Te;
@@ -1020,7 +1029,7 @@ double getTime(struct grid *gp, int id, configInfo *par){
 void
 solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   , struct blendInfo blends, int *nextMolWithBlend, gridPointData **mp\
-  , double **halfFirstDs, int *nMaserWarnings){
+  , double **halfFirstDs, int *nMaserWarnings,struct grid *gp3D,int gp_pIntensity, int gp_ncell){
 
   int id;
   realtype reltol, t;
@@ -1030,6 +1039,7 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   void *cvode_mem;
   int i,j;
   int retval;
+  int ncell = par->ncell, pIntensity = par->pIntensity;
 
   gsl_vector *newpop = gsl_vector_alloc(md[ispec].nlev);
 
@@ -1061,16 +1071,34 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
       if(current==timearr[j])
         time_struct.id[i] = j; //holds sorted ids according to the time(radius) of its corresponding gridpoint
   }
-  double (*jbar_grid)[md[ispec].nline] = malloc(sizeof(double[par->pIntensity][md[ispec].nline]));
+  if (par->useEP==2){
+  //Changing the values to those of the full grid to perform the jbar update
+  par->ncell = gp_ncell;
+  par->pIntensity = gp_pIntensity; 
+}
+  double (*jbar_grid)[md[ispec].nline] = malloc(sizeof(double[pIntensity][md[ispec].nline]));
+
+  int k;
 
   if(par->useEP==2){
-    for(id=0;id<par->pIntensity;id++)
-      updateJBar(id,md,gp,ispec,par,blends,nextMolWithBlend[id],mp[id],halfFirstDs[id]);
-
-    for(i=0;i<par->pIntensity;i++)
-      for(j=0;j<md[ispec].nline;j++)
-        jbar_grid[i][j] = mp[time_struct.id[i]][ispec].jbar[j];
+    for(id=0;id<par->pIntensity;id++){
+      updateJBar(id,md,gp3D,ispec,par,blends,nextMolWithBlend[id],mp[id],halfFirstDs[id]);
+    }
+    for(i=0;i<pIntensity;i++)
+      for(j=0;j<md[ispec].nline;j++){
+        id = time_struct.id[i];
+          for(k=0;k<gp_pIntensity;k++){
+            if(gp3D[k].id==gp[id].id) //we use the .id parameter to to the mapping between the grid points in the full grid and the subgrids
+              break;
+          }
+        jbar_grid[i][j] = mp[k][ispec].jbar[j];
+      }
   }
+
+  //Reverting to the original values in case they were changed when useEP==2
+  par->ncell = ncell;
+  par->pIntensity = pIntensity;
+
   /*Initializing Pops */
   for(i=0;i<md[ispec].nlev;i++)
     Pops[i] = gp[time_struct.id[0]].mol[ispec].pops[i]; //we use gp[time_struct.id[0]] since we only need to initialize the level populations for the initial time
@@ -1179,17 +1207,18 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
 
 /*....................................................................*/
 int
-levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *lamtab, double *kaptab, const int nEntries){
+levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *lamtab, double *kaptab, const int nEntries, struct grid *gp3D, int gp_pIntensity, int gp_ncell){
 
-  int id,ispec,i,nVerticesDone,nItersDone,nlinetot;
+  int id,ispec,i,nVerticesDone,nlinetot;
+  int ncell = par->ncell, pIntensity = par->pIntensity;
   int totalNMaserWarnings=0;
   const gsl_rng_type *ranNumGenType = gsl_rng_ranlxs2;
   struct blendInfo blends;
   char message[STR_LEN_0];
   int RNG_seeds[par->nThreads];
   gsl_error_handler_t *defaultErrorHandler=NULL;
-  int nextMolWithBlend[par->pIntensity],nMaserWarnings[par->pIntensity];
-  for(id=0;id<par->pIntensity;id++){
+  int nextMolWithBlend[gp_pIntensity],nMaserWarnings[gp_pIntensity];
+  for(id=0;id<gp_pIntensity;id++){
     nMaserWarnings[id] = 0;
   }
 
@@ -1213,9 +1242,9 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
       gsl_rng_set(ran,time(0));
 
     gsl_rng **threadRans;
-    threadRans = malloc(sizeof(gsl_rng *)*par->pIntensity);
+    threadRans = malloc(sizeof(gsl_rng *)*gp_pIntensity);
 
-    for (i=0;i<par->pIntensity;i++){
+    for (i=0;i<gp_pIntensity;i++){
       threadRans[i] = gsl_rng_alloc(ranNumGenType);
       if (par->resetRNG==1) RNG_seeds[i] = (int)(gsl_rng_uniform(ran)*1e6);
       else gsl_rng_set(threadRans[i],(int)(gsl_rng_uniform(ran)*1e6));
@@ -1230,49 +1259,51 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
    lineBlend(md, par, &blends);
 
    /* Initialize populations with Boltzmann distribution (assuming LTE) */
-   LTE(par,gp,md);
-
-   if(par->outputfile) popsout(par,gp,md);
+   if (par->useEP != 2) LTE(par,gp,md); //If useEp ==2, then the populations have already been initialized, and we don't want to override them
+   if(par->outputfile && par->useEP != 2) popsout(par,gp,md);
 
    defaultErrorHandler = gsl_set_error_handler_off();
 
-   nItersDone = par->nSolveItersDone;
-
-   while(nItersDone < par->nSolveIters){ 
-     printf("ITER %d / %d\n", nItersDone+1,par->nSolveIters);
-
-    gridPointData *mp[par->pIntensity];
-    double *halfFirstDs[par->pIntensity];
+    gridPointData *mp[gp_pIntensity];
+    double *halfFirstDs[gp_pIntensity];
 
     calcGridMolSpecNumDens(par,md,gp);
     totalNMaserWarnings = 0;
     nVerticesDone=0;
 
     //TODO: This for loop could be parallelized
-    for(id=0;id<par->pIntensity;id++){
+    for(id=0;id<gp_pIntensity;id++){
       ++nVerticesDone;
       nMaserWarnings[id]=0;
       nextMolWithBlend[id] = 0;
       mp[id]=malloc(sizeof(gridPointData)*par->nSpecies);
-      halfFirstDs[id] = malloc(sizeof(*halfFirstDs)*gp[id].nphot);
+      halfFirstDs[id] = malloc(sizeof(*halfFirstDs)*gp3D[id].nphot);
 
       for (ispec=0;ispec<par->nSpecies;ispec++){
         mp[id][ispec].jbar = malloc(sizeof(double)*md[ispec].nline);
-        mp[id][ispec].phot = malloc(sizeof(double)*md[ispec].nline*gp[id].nphot);
-        mp[id][ispec].vfac = malloc(sizeof(double)*                gp[id].nphot);
-        mp[id][ispec].vfac_loc = malloc(sizeof(double)*            gp[id].nphot);
+        mp[id][ispec].phot = malloc(sizeof(double)*md[ispec].nline*gp3D[id].nphot);
+        mp[id][ispec].vfac = malloc(sizeof(double)*                gp3D[id].nphot);
+        mp[id][ispec].vfac_loc = malloc(sizeof(double)*            gp3D[id].nphot);
+
       }
-      if(gp[id].dens[0] < 0 && gp[id].t[0] < 0){
+      if(gp3D[id].dens[0] < 0 && gp3D[id].t[0] < 0){
         printf("\nError on grid point = %d\n, aborting", id);
         exit(1);
       }
       else if (par->useEP==2){
-        calculateJBar(id,gp,md,threadRans[id],par,nlinetot,blends,mp[id],halfFirstDs[id],&nMaserWarnings[id]);
+        par->pIntensity = gp_pIntensity;
+        par->ncell  = gp_ncell;
+        calculateJBar(id,gp3D,md,threadRans[id],par,nlinetot,blends,mp[id],halfFirstDs[id],&nMaserWarnings[id]);
       }
     }
+
+    //These corresponds to the values of the subgrid, which would have been previously changed to the values that correspond to the complete grid if useEP=2 for the jbar calculation
+    par->pIntensity = pIntensity;
+    par->ncell = ncell;
+
     for(ispec=0;ispec<par->nSpecies;ispec++){
-      solveStatEq(gp,md,ispec,par,blends,nextMolWithBlend,mp,halfFirstDs, nMaserWarnings); 
-      for(i=0;i<par->pIntensity;i++)
+      solveStatEq(gp,md,ispec,par,blends,nextMolWithBlend,mp,halfFirstDs, nMaserWarnings,gp3D,gp_pIntensity, gp_ncell); 
+      for(i=0;i<gp_pIntensity;i++)
         if(par->blend && blends.mols!=NULL && ispec==blends.mols[nextMolWithBlend[i]].molI)
           nextMolWithBlend[i] = nextMolWithBlend[i] + 1;
     }
@@ -1292,11 +1323,9 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
       free(halfFirstDs[i]);
     }
     if(par->outputfile != NULL) popsout(par,gp,md);
-    nItersDone++;
-  }//end while
 
+  
   freeMolsWithBlends(blends.mols, blends.numMolsWithBlends);
-  freeGridCont(par, gp);
   for (i=0;i<par->pIntensity;i++)
     gsl_rng_free(threadRans[i]);
   free(threadRans);
