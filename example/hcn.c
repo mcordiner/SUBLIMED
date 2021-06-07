@@ -2,15 +2,17 @@
 
 double beta= 1.042e-5;
 double betahcn= 1.5e-5;
-
-double tkin = 50.;
 double rnuc = 2.5e2;
+double abund = 0.001;
+
+double openAngle = 30. * PI/180.;
+
+double tkin1 = 50.;
+double tkin2 = 50.;
 double Q1 = 2e28;
 double Q2 = 1e28;
 double vexp1 = 700.;
 double vexp2 = 500.;
-
-double abund = 0.001;
 
 /******************************************************************************/
 
@@ -21,7 +23,7 @@ input(inputPars *par, image *img){
  */
   par->Q1 = Q1;
   par->Q2 = Q2;
-  par->openAng = 30. * PI/180.
+  par->openAngle = openAngle;
   par->xne = 1.0;
   par->rHelio       = 1.0;
   par->radius           = 2e8;
@@ -55,71 +57,82 @@ input(inputPars *par, image *img){
 /******************************************************************************/
 
 void
-density1(double x, double y, double z, double *density){
+density(double x, double y, double z, double *density){
+/*
+ * Define variable for radial coordinate
+ */
+  double r,b,angle;
 
-  double r;
+  b = sqrt(x*x+y*y);
+  angle = atan2(b,-z);
 
+  const double rMin = rnuc; /* This cutoff should be chosen smaller than par->minScale but greater than zero (to avoid a singularity at the origin). */
+
+  /*
+   * Calculate radial distance from origin
+   */
   r=sqrt(x*x+y*y+z*z);
+  /*
+   * Calculate a Haser density profile
+   * (Multiply with 1e6 to go to SI-units)
+   */
 
-  if(r<rnuc)
-    density[0] = 1e-20; /* Just to prevent overflows at r==0! */
+  if(r<rMin)
+      density[0] = 1e-20; /* Just to prevent overflows at r==0! */
+  else if(angle<openAngle)
+    density[0] = Q1 /(4*PI*pow(r, 2)*vexp1)*exp(-r*beta/vexp1);
   else
-    density[0] =  /(4.*PI*pow(r, 2)*vexp)*exp(-r*beta/vexp);
-}
-
-void
-density2(double x, double y, double z, double *density){
-
-  double r;
-
-  r=sqrt(x*x+y*y+z*z);
-
-  if(r<rnuc)
-    density[0] = 1e-20; /* Just to prevent overflows at r==0! */
-  else
-    density[0] =  /(4.*PI*pow(r, 2)*vexp)*exp(-r*beta/vexp);
+    density[0] = Q2 /(4*PI*pow(r, 2)*vexp2)*exp(-r*beta/vexp2);
+  
 }
 
 /******************************************************************************/
 
 void
-temperature1(double x, double y, double z, double *temperature){
-  temperature[0] = tkin;
-}
+temperature(double x, double y, double z, double *temperature){
 
-void
-temperature2(double x, double y, double z, double *temperature){
-  temperature[0] = tkin;
+  double b,angle;
+
+  b = sqrt(x*x+y*y);
+  angle = atan2(b,-z);
+
+  if(angle<openAngle){
+    temperature[0] = tkin1;
+  }
+  else
+    temperature[0] = tkin2;
 }
 
 /******************************************************************************/
 
 void
-molNumDensity1(double x, double y, double z, double *nmol){
-  
-  double r;
-  
+molNumDensity(double x, double y, double z, double *nmol){
+ /*
+ * Define variable for radial coordinate
+ */
+  double r,b,angle;
+
+  b = sqrt(x*x+y*y);
+  angle = atan2(b,-z);
+
+  const double rMin = rnuc; /* This cutoff should be chosen smaller than par->minScale but greater than zero (to avoid a singularity at the origin). */
+
+  /*
+   * Calculate radial distance from origin
+   */
   r=sqrt(x*x+y*y+z*z);
+  /*
+   * Calculate a Haser density profile
+   * (Multiply with 1e6 to go to SI-units)
+   */
 
-  if(r<rnuc)
+  if(r<rMin)
     nmol[0] = 0.;
+  else if(angle<openAngle)
+    nmol[0] =abund*Q1/(4*PI*pow(r, 2)*vexp1)*exp(-r*betahcn/vexp1);
   else
-    nmol[0] = abund*Q1/(4*PI*pow(r, 2)*vexp1)*exp(-r*betahcn/vexp1);
+    nmol[0] =abund*Q2/(4*PI*pow(r, 2)*vexp2)*exp(-r*betahcn/vexp2);
 }
-
-void
-molNumDensity2(double x, double y, double z, double *nmol){
-  
-  double r;
-  
-  r=sqrt(x*x+y*y+z*z);
-
-  if(r<rnuc)
-    nmol[0] = 0.;
-  else
-    nmol[0] = abund*Q2/(4*PI*pow(r, 2)*vexp2)*exp(-r*betahcn/vexp2);
-}
-
 
 /******************************************************************************/
 
@@ -131,30 +144,14 @@ doppler(double x, double y, double z, double *doppler){
 /******************************************************************************/
 
 void
-velocity1(double x, double y, double z, double *vel){
+velocity(double x, double y, double z, double *vel){
 /*
  * Variables for spherical coordinates
  */
-  double phi, theta;
-/*
- * Transform Cartesian coordinates into spherical coordinates
- */
-  theta=atan2(sqrt(x*x+y*y),z);
-  phi=atan2(y,x);
-/*
- * Vector transformation back into Cartesian basis
- */
-  vel[0]=vexp1*sin(theta)*cos(phi);
-  vel[1]=vexp1*sin(theta)*sin(phi);
-  vel[2]=vexp1*cos(theta);
-}
+  double phi, theta,b,angle;
 
-void
-velocity2(double x, double y, double z, double *vel){
-/*
- * Variables for spherical coordinates
- */
-  double phi, theta;
+  b = sqrt(x*x+y*y);
+  angle = atan2(b,-z);
 /*
  * Transform Cartesian coordinates into spherical coordinates
  */
@@ -163,8 +160,16 @@ velocity2(double x, double y, double z, double *vel){
 /*
  * Vector transformation back into Cartesian basis
  */
-  vel[0]=vexp2*sin(theta)*cos(phi);
-  vel[1]=vexp2*sin(theta)*sin(phi);
-  vel[2]=vexp2*cos(theta);
+  if(angle<openAngle){
+    vel[0]=vexp1*sin(theta)*cos(phi);
+    vel[1]=vexp1*sin(theta)*sin(phi);
+    vel[2]=vexp1*cos(theta);
+
+  }
+  else{
+    vel[0]=vexp2*sin(theta)*cos(phi);
+    vel[1]=vexp2*sin(theta)*sin(phi);
+    vel[2]=vexp2*cos(theta);
+  }
 }
 
