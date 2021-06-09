@@ -38,7 +38,7 @@
 
 #include "dims.h"
 
-#define VERSION "1.9.3"
+#define VERSION "D-2.0 (2 trajectories)"
 #define DEFAULT_NTHREADS 1
 #ifndef NTHREADS /* Value passed from the LIME script */
 #define NTHREADS DEFAULT_NTHREADS
