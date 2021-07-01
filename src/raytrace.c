@@ -887,7 +887,7 @@ At the moment I will fix the number of segments, but it might possibly be faster
                   /* Calculate the red shift of the transition wrt to the frequency specified for the image.
                   */
                   if(img[im].trans > -1){
-                    lineRedShift=(md[img[im].molI].freq[img[im].trans]-md[molI].freq[lineI])/md[img[im].molI].freq[img[im].trans]*CLIGHT;
+                    lineRedShift=(md[molI].freq[img[im].trans]-md[molI].freq[lineI])/md[molI].freq[img[im].trans]*CLIGHT;
                   } else {
                     lineRedShift=(img[im].freq-md[molI].freq[lineI])/img[im].freq*CLIGHT;
                   }
@@ -1317,12 +1317,12 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
     numCircleRays = 0;
   }
 
-  const int supsamp = 20; // Number of rays per pixel (supsamp * supsamp in x,y plane)
+  const int supsamp = 30; // Number of rays per pixel dimension for central pixel supersampling
   scale = pixelSize/((double)supsamp);
   
   if(img[im].pxls % 2 != 0){
   // If there is an odd number of image pixels, supersample the innermost nsupsamppix x nsupsamppix region:
-      nsupsamppix = 5; 
+      nsupsamppix = 3; 
       shift = (pixelSize/2.0) + (scale/2.0);
       pixoff = 1;
       pixoff2 = 0;
@@ -1336,7 +1336,7 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
 
   /* The following is the first of the 3 main loops in raytrace. Here we loop over the (internal or non-sink) grid points. We're doing 2 things: loading the rotated, projected coordinates into the rays list, and counting the rays per image pixel.
   */
-  rays = malloc(sizeof(rayData)*(par->pIntensity+numCircleRays+pow((2*nsupsamppix*supsamp)-1,2))); /* We may need to reallocate this later. */
+  rays = malloc(sizeof(rayData)*(par->pIntensity+numCircleRays+pow((nsupsamppix*supsamp)-1,2))); /* We may need to reallocate this later. */
   numActiveRaysInternal = 0;
   for(gi=0;gi<par->pIntensity;gi++){
     /* Apply the inverse (i.e. transpose) rotation matrix. (We use the inverse matrix here because here we want to rotate grid coordinates to the observer frame, whereas inside traceray() we rotate observer coordinates to the grid frame.)
@@ -1385,7 +1385,7 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
   oneOnNumActiveRaysMinus1 = 1.0/(double)(numActiveRaysInternal-1);
 
 
-  if(numActiveRays<par->pIntensity+numCircleRays+pow((2*nsupsamppix*supsamp)-1,2))
+  if(numActiveRays<par->pIntensity+numCircleRays+pow((nsupsamppix*supsamp)-1,2))
     rays = realloc(rays, sizeof(rayData)*numActiveRays);
 
   if(par->traceRayAlgorithm==1){
