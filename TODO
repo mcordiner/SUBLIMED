@@ -1,7 +1,3 @@
-Create MODIFICATIONS.txt file
+Fix bug causing excessively high populations when there is no collision partner. Would be good to know why this is happening, but an easy fix is to enforce at least one collision partner.
 
-***************************
-New functionality required:
-***************************
 
-1. Enable coma asymmetry. Required changes will include the ability to specify n angular (conical) regions with unique outflow velocity and production rate. CVODE will therefore need to be called n times, and the resulting populations from each run need to be assigned to the relevant grid cells (within each respective predefined conical region), before raytracing. In the first instance, 2 conical regions will be sufficient.
