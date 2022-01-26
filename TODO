@@ -3,3 +3,5 @@ See also sublimed1d/TODO
 Fix bug causing excessively high populations when there is no collision partner. Would be good to know why this is happening, but an easy fix is to enforce at least one collision partner.
 
 Add RTOL and ATOL as user-accessible parameters.
+
+The model takes too long to run when there are >10,000 grid points. Probably, this is making CVODE struggle unnecessarily. Need to work out how to reduce the number of grid points to ~ a few hundred for the CVODE run, and interpolate them onto the Delaunay grid, for later raytracing. 
