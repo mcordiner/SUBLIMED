@@ -32,7 +32,7 @@ One final adjustment which was needed for good results with quasi-random sequenc
 
 /*....................................................................*/
 void __attribute__((weak))
-treePrintMessage(const int status, const char message[TREE_STRLEN]){
+treePrintMessage(const int status, char* message){
 
   if(     status==TREE_MSG_MESSAGE)
     printf("%s\n", message);
@@ -54,7 +54,7 @@ void setConstDefaults(treeRandConstType *rinc){
   rinc->quasiRandGenType    = (gsl_qrng_type *)gsl_qrng_halton;
   rinc->numDims             = N_DIMS;
   rinc->numInRandoms        = TREE_N_RANDOMS;
-  rinc->verbosity           = 0;
+  rinc->verbosity           = 1;
   rinc->totalNumHighPoints  = 0;
   rinc->maxRecursion        = TREE_MAX_RECURSION;
   rinc->maxNumTrials        = TREE_MAX_N_TRIALS;
