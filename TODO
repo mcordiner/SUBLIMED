@@ -1,9 +1,9 @@
 See also sublimed1d/TODO
 
-Fix bug causing excessively high populations when there is no collision partner. Would be good to know why this is happening, but an easy fix is to enforce at least one collision partner (in SUBLIMED1D H2O model this doesn't happen)
+Fix bug causing excessively high populations when there is no collision partner (note - in SUBLIMED1D H2O model this doesn't happen). Would be good to know why this is happening, but an easy fix is to enforce at least one collision partner 
 
 Add RTOL and ATOL as user-accessible parameters.
 
 The model takes too long to run when there are >10,000 grid points. Probably, this is making CVODE struggle unnecessarily. Need to work out how to reduce the number of grid points to ~ a few hundred for the CVODE run, and interpolate them onto the Delaunay grid, for later raytracing. 
 
-Jnu calculation (with useEP=2) is not having anything like the same effect as useEP=1 for H2O at Q=1e28 (see PRIMA model calc). Need to troubleshoot this before trusting any optically thick models with useEP=2.
+Jnu calculation (with useEP=2) is very slow (ODEs too stiff?). Perhaps adding a Jnu threshold would help, to mitigate excessive solver effort when Jnu*B terms are small/negligible, similar to the tau threshold implemented for useEP=1, which gave a huge speed boost.
