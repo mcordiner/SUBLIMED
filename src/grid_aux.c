@@ -367,7 +367,7 @@ void distCalc(configInfo *par, struct grid *gp){
 
 /*....................................................................*/
 void
-write_VTK_unstructured_Points(configInfo *par, struct grid *g){
+write_legacy_VTK_unstructured_Points(configInfo *par, struct grid *g){
   FILE *fp;
   double length;
   int i,j,l=0;
@@ -454,6 +454,125 @@ write_VTK_unstructured_Points(configInfo *par, struct grid *g){
       fprintf(fp, "%e %e %e\n", g[i].vel[0],g[i].vel[1],g[i].vel[2]);
     }
   }
+
+  fclose(fp);
+  free(pt_array);
+}
+
+/*....................................................................*/
+void
+write_VTK_unstructured_Points(configInfo *par, struct grid *g){
+  FILE *fp;
+  double length;
+  int i,j,l=0;
+  char flags[255];
+  boolT ismalloc = False;
+  facetT *facet;
+  vertexT *vertex,**vertexp;
+  coordT *pt_array;
+  int curlong, totlong;
+
+  pt_array=malloc(sizeof(coordT)*DIM*par->ncell);
+
+  for(i=0;i<par->ncell;i++) {
+    for(j=0;j<DIM;j++) {
+      pt_array[i*DIM+j]=g[i].x[j];
+    }
+  }
+
+  if((fp=fopen(par->gridfile, "w"))==NULL){
+    if(!silent) bail_out("Error writing grid file!");
+    exit(1);
+  }
+  /* Write out grid using XML-based VTU syntax */
+  fprintf(fp,"<?xml version=\"1.0\"?>\n");
+  fprintf(fp,"<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
+  fprintf(fp," <UnstructuredGrid>\n");
+
+  sprintf(flags,"qhull d Qbb T0");
+
+  if (!qh_new_qhull(DIM, par->ncell, pt_array, ismalloc, flags, NULL, NULL)) {
+  FORALLfacets {
+    if (!facet->upperdelaunay) l++;
+    }
+  }
+  fprintf(fp,"  <Piece NumberOfPoints=\"%d\" NumberOfCells=\"%d\">\n",par->ncell,l);
+  fprintf(fp,"   <PointData Scalars=\"Density,Mol_Density,Abundance,Gas_Temperature\" Vectors=\"Velocity\">\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" Name=\"Density\" format=\"ascii\">\n");
+  for(i=0;i<par->ncell;i++){
+    fprintf(fp, "     %e\n", g[i].dens[0]);
+  }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" Name=\"Mol_Density\" format=\"ascii\">\n");
+  if(par->nSpecies>0){
+      for(i=0;i<par->ncell;i++){
+        fprintf(fp, "     %e\n", g[i].mol[0].nmol);
+      }
+    }else{
+      for(i=0;i<par->ncell;i++){
+        fprintf(fp, "     %e\n", 0.0);
+      }
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" Name=\"Abundance\" format=\"ascii\">\n");
+  if(par->nSpecies>0){
+      for(i=0;i<par->ncell;i++){
+        fprintf(fp, "     %e\n", g[i].mol[0].nmol/g[i].dens[0]);
+      }
+    }else{
+      for(i=0;i<par->ncell;i++){
+        fprintf(fp, "     %e\n", 0.0);
+      }
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" Name=\"Gas_Temperature\" format=\"ascii\">\n");
+  for(i=0;i<par->ncell;i++){
+    fprintf(fp, "     %e\n", g[i].t[0]);
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" Name=\"Velocity\" format=\"ascii\" NumberOfComponents=\"3\">\n");
+  for(i=0;i<par->ncell;i++){
+    length=sqrt(g[i].vel[0]*g[i].vel[0]+g[i].vel[1]*g[i].vel[1]+g[i].vel[2]*g[i].vel[2]);
+    if(length > 0.){
+      fprintf(fp, "     %e %e %e\n", g[i].vel[0]/length,g[i].vel[1]/length,g[i].vel[2]/length);
+    } else {
+      fprintf(fp, "     %e %e %e\n", g[i].vel[0],g[i].vel[1],g[i].vel[2]);
+      }
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"   </PointData>\n");
+  fprintf(fp,"   <Points>\n");
+  fprintf(fp,"    <DataArray type=\"Float32\" format=\"ascii\" NumberOfComponents=\"3\">\n");
+  for(i=0; i<par->ncell; i++) {
+    fprintf(fp,"     %e %e %e\n", g[i].x[0], g[i].x[1], g[i].x[2]);
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"   </Points>\n");
+  fprintf(fp,"   <Cells>\n");
+  fprintf(fp,"    <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n");
+  FORALLfacets {
+      if (!facet->upperdelaunay) {
+        FOREACHvertex_ (facet->vertices) {
+          fprintf(fp, "     %d ", qh_pointid(vertex->point));
+          }
+        fprintf(fp, "\n");
+        }
+      }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n");
+  for(i=0;i<l;i++){
+    fprintf(fp,"     %i\n",4*(i+1));
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"    <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n");
+  for(i=0;i<l;i++){
+    fprintf(fp, "     10\n");
+    }
+  fprintf(fp,"    </DataArray>\n");
+  fprintf(fp,"   </Cells>\n");
+  fprintf(fp,"  </Piece>\n",par->ncell,l);
+  fprintf(fp," </UnstructuredGrid>\n");
+  fprintf(fp,"</VTKFile>\n");
 
   fclose(fp);
   free(pt_array);
