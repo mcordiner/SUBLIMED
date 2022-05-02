@@ -37,7 +37,7 @@ input(inputPars *par, image *img){
   par->useEP       = 0;
   par->nSolveIters  = 1;
   par->outputfile = "hcn.pop";
-  par->gridfile         = "grid.vtk";
+  par->gridfile         = "grid.vtu";
   par->collPartIds[0]   = 1;
   par->nMolWeights[0]   = 1.0;
 
