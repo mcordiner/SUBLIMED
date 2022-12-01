@@ -38,7 +38,7 @@
 
 #include "dims.h"
 
-#define VERSION "1.9.3"
+#define VERSION "D-2.2 (2 trajectories)"
 #define DEFAULT_NTHREADS 1
 #ifndef NTHREADS /* Value passed from the LIME script */
 #define NTHREADS DEFAULT_NTHREADS
@@ -48,6 +48,7 @@
 
 #define HPIP            8.918502221e-27      /* HPLANCK*CLIGHT/4.0/PI/SPI	*/
 #define HCKB            1.43877735           /* 100.*HPLANCK*CLIGHT/KBOLTZ	*/
+#define FWHMSIGMA       2.35482              /* 2*sqrt(2*ln(2)) */               
 
 /* Other constants */
 #define NITERATIONS             16
@@ -70,6 +71,14 @@
 #define NUM_VEL_COEFFS          (1+2*N_VEL_SEG_PER_HALF) /* This is the number of velocity samples per edge (not including the grid vertices at each end of the edge). Currently this is elsewhere hard-wired at 3, the macro just being used in the file I/O modules. Note that we want an odd number of velocity samples per edge if we want to have the ability to do 2nd-order interpolation of velocity within Delaunay tetrahedra. */
 #define MAX_NEG_OPT_DEPTH	30.0			/* 30 was the original value in LIME. */
 #define NUM_RAN_DENS		100
+#define RTOL 1.0e-10   /* CVODE scalar relative tolerance */
+#define ATOL 1.0e-10   /* CVODE vector absolute tolerance components */
+#define MINTOL 1.0e-15 /*Minimum allowed value for RTOL and ATOL*/
+#define ICUTOFF 1.0e-02 /*Fraction of Gaussian line peak outside which to exclude wings during raytracing*/
+#define NRADS 300 /*Number of radial points for the CVODE integral*/
+#define SUBGRID1 -1 //Radius parity for conical jet   
+#define SUBGRID2 1  //Radius parity for ambient coma
+
 
 /* Bit locations for the grid data-stage mask, that records the information which is present in the grid struct: */
 #define DS_bit_x             0	/* id, x, sink */
@@ -118,7 +127,7 @@ struct cpData {
 typedef struct {
   int nlev,nline,npart;
   int *lal,*lau;
-  double *aeinst,*freq,*beinstu,*beinstl,*eterm,*gstat,*gir;
+  double *aeinst,*freq,*beinstu,*beinstl,*eterm,*gstat,*gir,*redShift;
   double *cmb,amass;
   struct cpData *part;
   char molName[80];
@@ -150,6 +159,7 @@ struct grid {
   int id;
   double x[DIM], vel[DIM], B[3]; /* B field only makes physical sense in 3 dimensions. */
   double *v1,*v2,*v3;
+  double radius;
   int numNeigh;
   struct point *dir;
   struct grid **neigh;
@@ -243,7 +253,7 @@ double	geterf(const double, const double);
 void	getEdgeVelocities(configInfo *, struct grid *);
 void	input(inputPars*, image*);
 double	interpolateKappa(const double, double*, double*, const int, gsl_spline*, gsl_interp_accel*);
-int	levelPops(molData*, configInfo*, struct grid*, int*, double*, double*, const int);
+int	levelPops(molData*, configInfo*, struct grid*, int*, double*, double*, const int,struct grid*, int, int, double*,int,int*,int);
 void	mallocAndSetDefaultGrid(struct grid**, const size_t, const size_t);
 void	mallocAndSetDefaultMolData(const int, molData**);
 void	molInit(configInfo*, molData*);
@@ -272,6 +282,7 @@ void	writeFitsAllUnits(const int, configInfo*, imageInfo*);
 void	writeGridIfRequired(configInfo*, struct grid*, molData*, const int);
 void	writeGridToAscii(char *outFileName, struct grid *gp, const unsigned int nInternalPoints, const int dataFlags);
 void	write_VTK_unstructured_Points(configInfo*, struct grid*);
+double linear_interp(double x0, double x1, double y0, double y1, double value);
 
 
 /* Curses functions */

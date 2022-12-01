@@ -33,8 +33,10 @@ initParImg(inputPars *par, image **img)
   par->minScale  = 0;
   par->pIntensity= 0;
   par->sinkPoints= 0;
-  par->Qwater    = 0;
+  par->Q1    = -1;
+  par->Q2    = -1;
   par->rHelio    = 0; 
+  par->openAngle = -1;
 
   /* Set default values for optional parameters */
   par->dust  	    = NULL;
@@ -44,7 +46,8 @@ initParImg(inputPars *par, image **img)
   par->pregrid      = NULL;
   par->restart      = NULL;
   par->gridInFile   = NULL;
-  par ->useEP       = 1;
+  par->useEP       = 1;
+  par->fixRNG = 0;
   
   par->collPartIds  = malloc(sizeof(int)*MAX_N_COLL_PART);
   for(i=0;i<MAX_N_COLL_PART;i++) par->collPartIds[i] = 0; /* Possible values start at 1. */

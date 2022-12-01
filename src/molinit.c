@@ -127,6 +127,7 @@ exit(1);
     md[i].freq    = malloc(sizeof(double)*md[i].nline);
     md[i].beinstu = malloc(sizeof(double)*md[i].nline);
     md[i].beinstl = malloc(sizeof(double)*md[i].nline);
+    md[i].redShift = malloc(sizeof(double)*md[i].nline);
 
     /* Read transitions, Einstein A, and frequencies */
     for(iline=0;iline<md[i].nline;iline++){

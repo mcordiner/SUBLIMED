@@ -146,6 +146,7 @@ freeMolData(const int nSpecies, molData *md){
       free(md[i].eterm);
       free(md[i].gstat);
       free(md[i].cmb);
+      free(md[i].redShift);
     }
     free(md);
   }

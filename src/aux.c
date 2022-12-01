@@ -22,11 +22,27 @@ exit(1);
 }
 
 /*....................................................................*/
+int isInsideAngle(double x, double y, double z, configInfo *par){
+
+  double b,angle;
+
+  b = sqrt(x*x+y*y);
+  angle = atan2(b,-z);
+  
+  return(angle < par->openAngle);
+}
+
+/*....................................................................*/
 int compare(const void *a,const void *b) {
 double *x = (double *) a;
 double *y = (double *) b;
 if (*x < *y) return -1;
 else if (*x > *y) return 1; return 0;
+}
+
+/*....................................................................*/
+double linear_interp(double x0, double x1, double y0, double y1, double value){
+  return((y0*(x1-value) + y1*(value-x0))/(x1-x0));
 }
 
 /*....................................................................*/
@@ -47,7 +63,7 @@ exit(1);
 void checkFscanf(const int fscanfResult, const int expectedNum, char *message){
   const size_t buflen=80;
   char string[buflen];
-
+ 
   if(fscanfResult!=expectedNum){
     if(!silent){
       snprintf(string, buflen, "fscanf() failed to read %s - read %d bytes when %d expected.", message, fscanfResult, expectedNum);
@@ -330,4 +346,3 @@ _Bool onlyBitsSet(const int flags, const int mask){
   else
     return 1;
 }
-

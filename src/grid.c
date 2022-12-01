@@ -463,6 +463,11 @@ exit(1);
 
     par->dataFlags |= DS_mask_1;
   }
+  
+  for (i = 0;i < par->pIntensity;i++) {
+    (*gp)[i].radius = sqrt((*gp)[i].x[0] * (*gp)[i].x[0] + (*gp)[i].x[1] * (*gp)[i].x[1] + (*gp)[i].x[2] * (*gp)[i].x[2]);
+  }
+  
 
   if(onlyBitsSet(par->dataFlags, DS_mask_1)) /* Only happens if (i) we read no file and have constructed this data within LIME, or (ii) we read a file at dataStageI==1. */
     writeGridIfRequired(par, *gp, NULL, 1);

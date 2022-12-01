@@ -24,6 +24,17 @@ struct baryVelBuffType {
   double **vertexVels,**edgeVels,*entryCellBary,*midCellBary,*exitCellBary,*shapeFns;
 };
 
+struct lineChans{
+  int numLines;
+  int *numChanLines;
+  int *chanLineIDs;
+  int *lineIDs;
+};
+
+struct lineData{
+  struct lineChans *mols;
+};
+
 typedef struct{
   double x[DIM], xCmpntRay, B[3];
   struct populations *mol;
@@ -184,7 +195,7 @@ Note that this is called from within the multi-threaded block.
 void
 traceray(rayData ray, const int im\
   , configInfo *par, struct grid *gp, molData *md, imageInfo *img\
-  , const double cutoff, const int nSteps, const double oneOnNSteps){
+  , const double cutoff, const int nSteps, const double oneOnNSteps, struct lineData lineData){
   /*
 For a given image pixel position, this function evaluates the intensity of the total light emitted/absorbed along that line of sight through the (possibly rotated) model. The calculation is performed for several frequencies, one per channel of the output image.
 
@@ -279,29 +290,16 @@ if(!if(par->useVelFuncInRaytrace)): vel
 
         if(img[im].doline){
           for(molI=0;molI<par->nSpecies;molI++){
-            for(lineI=0;lineI<md[molI].nline;lineI++){
-              if(md[molI].freq[lineI] > img[im].freq-img[im].bandwidth*0.5\
-              && md[molI].freq[lineI] < img[im].freq+img[im].bandwidth*0.5){
-                /* Calculate the red shift of the transition wrt to the frequency specified for the image.
-                */
-                if(img[im].trans > -1){
-                  lineRedShift=(md[img[im].molI].freq[img[im].trans]-md[molI].freq[lineI])/md[img[im].molI].freq[img[im].trans]*CLIGHT;
-                } else {
-                  lineRedShift=(img[im].freq-md[molI].freq[lineI])/img[im].freq*CLIGHT;
-                }
-
-                deltav = vThisChan - img[im].source_vel - lineRedShift;
+            //Loop through all lines that contribute to this channel
+            for(i=0;i<lineData.mols[molI].numChanLines[ichan];i++){
+                lineI = lineData.mols[molI].chanLineIDs[(i*img[im].nchan)+ichan];
+                deltav = vThisChan - img[im].source_vel - md[molI].redShift[lineI];
                 /* Line centre occurs when deltav = the recession velocity of the radiating material. Explanation of the signs of the 2nd and 3rd terms on the RHS: (i) A bulk source velocity (which is defined as >0 for the receding direction) should be added to the material velocity field; this is equivalent to subtracting it from deltav, as here. (ii) A positive value of lineRedShift means the line is red-shifted wrt to the frequency specified for the image. The effect is the same as if the line and image frequencies were the same, but the bulk recession velocity were higher. lineRedShift should thus be added to the recession velocity, which is equivalent to subtracting it from deltav, as here. */
 
-                /* Calculate an approximate average line-shape function at deltav within the Voronoi cell. */
-                if(par->useVelFuncInRaytrace) /* because only in this case do we have projVels. */
-                  calcLineAmpSample(x,dx,ds,gp[posn].mol[molI].binv,projVels,nSteps,oneOnNSteps,deltav,&vfac);
-                else
-                  vfac = gaussline(deltav-dotProduct3D(dx,gp[posn].vel),gp[posn].mol[molI].binv);
+                vfac = gaussline(deltav-dotProduct3D(dx,gp[posn].vel),gp[posn].mol[molI].binv);
 
                 /* Increment jnu and alpha for this Voronoi cell by the amounts appropriate to the spectral line. */
                 sourceFunc_line(&md[molI],vfac,&(gp[posn].mol[molI]),lineI,&jnu,&alpha);
-              }
             }
           }
         } /* end if(img[im].doline) */
@@ -887,7 +885,7 @@ At the moment I will fix the number of segments, but it might possibly be faster
                   /* Calculate the red shift of the transition wrt to the frequency specified for the image.
                   */
                   if(img[im].trans > -1){
-                    lineRedShift=(md[img[im].molI].freq[img[im].trans]-md[molI].freq[lineI])/md[img[im].molI].freq[img[im].trans]*CLIGHT;
+                    lineRedShift=(md[molI].freq[img[im].trans]-md[molI].freq[lineI])/md[molI].freq[img[im].trans]*CLIGHT;
                   } else {
                     lineRedShift=(img[im].freq-md[molI].freq[lineI])/img[im].freq*CLIGHT;
                   }
@@ -1218,14 +1216,16 @@ Note that the argument 'md', and the grid element '.mol', are only accessed for 
   unsigned int totalNumImagePixels,ppi,numPixelsForInterp;
   int ichan,numCircleRays,numActiveRaysInternal,numActiveRays,lastChan;
   int pixoff,pixoff2,pixshiftx,pixshifty,shift,nsupsamppix;
-  int gi,molI,lineI,i,di,xi,yi,ri,vi,ei,i0,i1,j;
+  int id,gi,molI,lineI,i,di,xi,yi,ri,vi,ei,i0,i1,j;
   int cmbMolI,cmbLineI;
   rayData *rays;
+  struct lineData lineData;
   struct cell *dc=NULL;
   struct simplex *cells=NULL;
   unsigned long numCells,dci,numPointsInAnnulus;
   double local_cmb,cmbFreq,circleSpacing,scale,angle,rSqu,progFraction;
   double *vertexCoords=NULL;
+  double vel,vfac,lineRedShift,deltav,maxvexp,vexp;
   gsl_error_handler_t *defaultErrorHandler=NULL;
   struct baryVelBuffType velBuff,*ptrToBuff=NULL;
 
@@ -1252,6 +1252,63 @@ Note that the argument 'md', and the grid element '.mol', are only accessed for 
       img[im].bandwidth = img[im].nchan*img[im].velres/CLIGHT*img[im].freq;
     }
   } /* If not doline, we already have img.freq and nchan by now anyway. */
+
+  /* Work out which lines contribute to each image channel based on a Gaussian lineshape and ICUTOFF*/
+  //Loop through the grid to find maximum value for vexp:
+  maxvexp=0.;
+  for(id=0;id<par->pIntensity;id++){  
+      vexp = sqrt(gp[id].vel[0]* gp[id].vel[0]+gp[id].vel[1]*gp[id].vel[1]+gp[id].vel[2]*gp[id].vel[2]);
+      if(vexp>maxvexp) maxvexp = vexp;
+  }
+  
+  lineData.mols = malloc(sizeof(*lineData.mols) * par->nSpecies);
+  int numLines= 0;
+
+  //For each molecule,count how many lines fall within the spectral range of the image. This way, we know how much space to allocate for each lineData.mols[molI].lineIDs
+  //We do these steps now so that we don't need to determine which spectral lines contribute to the image repeteadly inside traceray(), which is time consuming
+  for(molI=0;molI<par->nSpecies;molI++){
+    lineData.mols[molI].lineIDs = malloc(sizeof(*lineData.mols[molI].lineIDs) * md[molI].nline);
+    for(lineI=0;lineI<md[molI].nline;lineI++){
+      if((md[molI].freq[lineI] * (1. - img[im].source_vel/CLIGHT)) > img[im].freq-img[im].bandwidth*0.5\
+        && (md[molI].freq[lineI] * (1. - img[im].source_vel/CLIGHT)) < img[im].freq+img[im].bandwidth*0.5){
+        lineData.mols[molI].lineIDs[numLines] = lineI;
+        numLines++;
+      }
+    }
+    lineData.mols[molI].chanLineIDs = malloc(sizeof(*lineData.mols[molI].chanLineIDs)*numLines*img[im].nchan);
+    lineData.mols[molI].numChanLines = malloc(sizeof(*lineData.mols[molI].numChanLines)*img[im].nchan);
+    lineData.mols[molI].numLines = numLines;
+    numLines = 0;
+  }
+
+  //Now we store the indices of the lines that contribute to each channel of the image.
+  for(molI=0;molI<par->nSpecies;molI++){
+      for(ichan=0;ichan<img[im].nchan;ichan++){   
+         lineData.mols[molI].numChanLines[ichan] = 0;
+         j=0;
+         vel = (ichan-(img[im].nchan-1)*0.5)*img[im].velres; 
+         for(i=0;i<lineData.mols[molI].numLines;i++){
+            lineI=lineData.mols[molI].lineIDs[i];
+            if(img[im].trans > -1){
+               lineRedShift=(md[img[im].molI].freq[img[im].trans]-md[molI].freq[lineI])/md[img[im].molI].freq[img[im].trans]*CLIGHT;
+            } else {
+               lineRedShift=(img[im].freq-md[molI].freq[lineI])/img[im].freq*CLIGHT;
+            }
+            deltav = vel - img[im].source_vel - lineRedShift;
+            //Approximate the coma lineshape as a Gaussian of FWHM = 2*maxvexp
+            vfac = gaussline(deltav,FWHMSIGMA/(2*maxvexp));
+            if(vfac>ICUTOFF){
+              lineData.mols[molI].chanLineIDs[(j*img[im].nchan) + ichan] = lineI;
+              j++;
+            }else{
+              lineData.mols[molI].chanLineIDs[(j*img[im].nchan) + ichan] = 0;
+            }
+            lineData.mols[molI].numChanLines[ichan] = j;
+            /*Store the line redshift for later use in traceray()*/
+            md[molI].redShift[lineI] = lineRedShift;            
+         }    
+      }
+   }
 
   /*
 We need to calculate or choose a single value of 'local' CMB flux, also single values (i.e. one of each per grid point) of dust and knu, all corresponding the the nominal image frequency. The sensible thing would seem to be to calculate them afresh for each new image; and for continuum images, this is what in fact has always been done. For line images however local_cmb and the dust/knu values were calculated for the frequency of each spectral line and stored respectively in the molData struct and the struct populations element of struct grid. These multiple values (of dust/knu at least) are required during the main solution kernel of LIME, so for line images at least they were kept until the present point, just so one from their number could be chosen. :-/
@@ -1317,12 +1374,12 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
     numCircleRays = 0;
   }
 
-  const int supsamp = 20; // Number of rays per pixel (supsamp * supsamp in x,y plane)
+  const int supsamp = 30; // Number of rays per pixel dimension for central pixel supersampling
   scale = pixelSize/((double)supsamp);
   
   if(img[im].pxls % 2 != 0){
   // If there is an odd number of image pixels, supersample the innermost nsupsamppix x nsupsamppix region:
-      nsupsamppix = 5; 
+      nsupsamppix = 3; 
       shift = (pixelSize/2.0) + (scale/2.0);
       pixoff = 1;
       pixoff2 = 0;
@@ -1336,7 +1393,7 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
 
   /* The following is the first of the 3 main loops in raytrace. Here we loop over the (internal or non-sink) grid points. We're doing 2 things: loading the rotated, projected coordinates into the rays list, and counting the rays per image pixel.
   */
-  rays = malloc(sizeof(rayData)*(par->pIntensity+numCircleRays+pow((2*nsupsamppix*supsamp)-1,2))); /* We may need to reallocate this later. */
+  rays = malloc(sizeof(rayData)*(par->pIntensity+numCircleRays+pow((nsupsamppix*supsamp)-1,2))); /* We may need to reallocate this later. */
   numActiveRaysInternal = 0;
   for(gi=0;gi<par->pIntensity;gi++){
     /* Apply the inverse (i.e. transpose) rotation matrix. (We use the inverse matrix here because here we want to rotate grid coordinates to the observer frame, whereas inside traceray() we rotate observer coordinates to the grid frame.)
@@ -1385,7 +1442,7 @@ How to calculate this distance? Well if we have N points randomly but evenly dis
   oneOnNumActiveRaysMinus1 = 1.0/(double)(numActiveRaysInternal-1);
 
 
-  if(numActiveRays<par->pIntensity+numCircleRays+pow((2*nsupsamppix*supsamp)-1,2))
+  if(numActiveRays<par->pIntensity+numCircleRays+pow((nsupsamppix*supsamp)-1,2))
     rays = realloc(rays, sizeof(rayData)*numActiveRays);
 
   if(par->traceRayAlgorithm==1){
@@ -1502,7 +1559,7 @@ While this is off however, gsl_* calls will not exit if they encounter a problem
     for(ri=0;ri<numActiveRaysInternal;ri++){
       if(par->traceRayAlgorithm==0)
         traceray(rays[ri], im, par, gp, md, img\
-          , cutoff, nStepsThruCell, oneOnNSteps);
+          , cutoff, nStepsThruCell, oneOnNSteps, lineData);
 
       else if(par->traceRayAlgorithm==1)
         traceray_smooth(rays[ri], im, par, gp, vertexCoords, md, img\
@@ -1683,6 +1740,12 @@ While this is off however, gsl_* calls will not exit if they encounter a problem
     free(rays[ri].intensity);
   }
   free(rays);
+  
+  for(molI=0;molI<par->nSpecies;molI++){
+    free(lineData.mols[molI].numChanLines);
+    free(lineData.mols[molI].chanLineIDs);
+    free(lineData.mols[molI].lineIDs);
+  }
 
   /*
 Add and subtract appropriate amounts of cmb.
