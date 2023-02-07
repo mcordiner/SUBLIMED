@@ -29,6 +29,8 @@ typedef struct {
   int nchan,trans,molI;
   double velres;
   double imgres;
+  double xPixOff;
+  double yPixOff;
   int pxls;
   int unit;
   char *units;

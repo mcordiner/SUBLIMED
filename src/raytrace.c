@@ -1231,8 +1231,8 @@ Note that the argument 'md', and the grid element '.mol', are only accessed for 
 
   pixelSize = img[im].distance*img[im].imgres;
   totalNumImagePixels = img[im].pxls*img[im].pxls;
-  imgCentreXPixels = img[im].pxls/2.0;
-  imgCentreYPixels = img[im].pxls/2.0;
+  imgCentreXPixels = img[im].pxls/2.0 + img[im].xPixOff;
+  imgCentreYPixels = img[im].pxls/2.0 + img[im].yPixOff;
 
   if(img[im].doline){
     /* The user may have set img.trans/img.molI but not img.freq. If so, we calculate freq now.

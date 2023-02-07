@@ -645,6 +645,8 @@ The cutoff will be the value of abs(x) for which the error in the exact expressi
       (*img)[i].molI       = inimg[i].molI;
       (*img)[i].velres     = inimg[i].velres;
       (*img)[i].imgres     = inimg[i].imgres;
+      (*img)[i].xPixOff    = inimg[i].xPixOff;
+      (*img)[i].yPixOff    = inimg[i].yPixOff;
       (*img)[i].pxls       = inimg[i].pxls;
       copyInparStr(inimg[i].units, &((*img)[i].units));
       (*img)[i].freq       = inimg[i].freq;

@@ -187,6 +187,8 @@ typedef struct {
   struct spec *pixel;
   double velres;
   double imgres;
+  double xPixOff;
+  double yPixOff;
   int pxls;
   char *units;
   int *imgunits;
