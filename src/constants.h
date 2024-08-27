@@ -45,6 +45,9 @@
 #define MSUN_cgs        (MSUN*1000.0)        /* Solar mass                   [g]		*/
 #define RSUN_cgs        (RSUN*100.0)         /* Solar radius                 [cm]		*/
 
+#define MATM            (AMU * 18.0)         /* Mean mass of the coma particles, defined in case of Meudon-style collision rate calculation */
+#define XSEC            5.e-18               /* Average collision cross section in case of no LAMDA collision data (m^2) */
+
 #ifndef TRUE
 #define TRUE                   (_Bool)1
 #endif

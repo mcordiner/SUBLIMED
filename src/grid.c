@@ -158,10 +158,11 @@ dumpGrid(configInfo *par, struct grid *g){
 int pointEvaluation(configInfo *par, const double uniformRandom, double *r){
   double fracDensity;
 
-  fracDensity = gridDensity(par, r);
+  //fracDensity = gridDensity(par, r);
 
-  if(uniformRandom < fracDensity) return 1;
-  else return 0;
+  //if(uniformRandom < fracDensity) return 1;
+  //else return 0;
+  return 1;
 }
 
 /*....................................................................*/

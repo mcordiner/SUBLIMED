@@ -371,6 +371,10 @@ void molInit(configInfo *par, molData *md){
       for(j=0;j<md[i].npart;j++){
         if(md[i].part[j].densityIndex>=0)
           copyInparStr(par->collPartNames[md[i].part[j].densityIndex], &(md[i].part[j].name));
+      
+        if(md[i].part[j].ntrans == 0)
+          printf("WARNING: No collision rates supplied in LAMDA file; using mean cross section of %8.3e", XSEC);
+
       }
 
       jStart = 0;
