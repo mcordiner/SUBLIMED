@@ -809,7 +809,7 @@ getTransitionRates(molData *md, int ispec, struct grid *gp, configInfo *par, int
   rnuc = par->minScale;
   density(0.0,0.0,subGrid*radius,dens);
   temperature(0.0,0.0,subGrid*radius,tkin);
-  lteOnePoint(md, ispec, tkin[ipart], LTEpops);
+  lteOnePoint(md, ispec, tkin[0], LTEpops);
 
   /* Initialize matrix with zeros */
   if(md[ispec].nlev<=0){
