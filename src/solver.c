@@ -1359,8 +1359,7 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
     }
     if(par->outputfile != NULL) popsout(par,gp,md);
 
-  
-  freeMolsWithBlends(blends.mols, blends.numMolsWithBlends);
+  if(par->useEP == 2) freeMolsWithBlends(blends.mols, blends.numMolsWithBlends);
   for (i=0;i<par->pIntensity;i++)
     gsl_rng_free(threadRans[i]);
   free(threadRans);
