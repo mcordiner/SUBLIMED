@@ -861,7 +861,7 @@ getTransitionRates(molData *md, int ispec, struct grid *gp, configInfo *par, int
    }else{
    /* Otherwise use the Meudon approximation */
      vkin = sqrt(8.0*KBOLTZ*tkin[ipart]/PI * (1.0/md[ispec].amass + 1.0/MATM));
-     collRate = dens[ipart]*vkin*XSEC;
+     collRate = dens[ipart]*vkin*XSEC*par->colliScale;
      for(k=0;k<md[ispec].nlev;k++){
         for(l=0;l<md[ispec].nlev;l++){
           p[l * NEQ + k] = p[l * NEQ + k] + collRate * LTEpops[k];  
