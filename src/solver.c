@@ -64,7 +64,6 @@ struct time_struct{
 struct transitionParams{
   int array_size; //Equal to the number of levels (i.e NEQ)
   double *A_array; //Holds Einstein's As
-  double *transition_rates; //Holds transition rates
   molData *md;
   int ispec;
   struct grid *gp;
@@ -992,8 +991,10 @@ int f(realtype radius, N_Vector P, N_Vector Pdot, void *data){
   int i, j, NEQ, id;
   struct transitionParams *user_data = data;
   NEQ = user_data -> array_size;
-  double *p = user_data -> transition_rates;
+  double *p;
   double Pops_array[NEQ], vel[DIM], vexp;
+
+  p = malloc(sizeof(double[NEQ][NEQ]));
 
   velocity(0.,0.,user_data->subGrid*radius,vel);
   vexp = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
@@ -1022,7 +1023,7 @@ int f(realtype radius, N_Vector P, N_Vector Pdot, void *data){
     //  printf("%d %le\n",i,  Ith(Pdot,i));
    }
  
-    
+  free(p);  
   return(0);
 }
 
@@ -1047,7 +1048,6 @@ void
 solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   , struct blendInfo blends, int *nextMolWithBlend, gridPointData **mp\
   , double **halfFirstDs, int *nMaserWarnings,struct grid *gp3D,int gp_pIntensity, int gp_ncell, double *radii, int subGrid_pIntensity, int *gp_sorter, int subGrid){
-
   int id;
   realtype reltol, t;
   N_Vector P, abstol;
@@ -1059,20 +1059,22 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   int ncell = par->ncell, pIntensity = par->pIntensity;
 
   gsl_vector *newpop = gsl_vector_alloc(md[ispec].nlev);
-
   /* Initializing parameters to be used by CVode */
   int NEQ = md[ispec].nlev; // Number of Equations .
-  double p[NEQ][NEQ]; //Collisional rates
   double A[md[ispec].nline]; //Einstein As
   double Pops[NEQ]; //Level Populations
-  double popGrid[NRADS][NEQ]; //Populations as a function of radius 
+  double (*popGrid)[NEQ]; //Populations as a function of radius 
+  double (*jbar_grid)[md[ispec].nline];
   
-  double (*jbar_grid)[md[ispec].nline] = malloc(sizeof(double[pIntensity][md[ispec].nline])); 
-   
+  popGrid = malloc(sizeof(double[NRADS][NEQ]));
+  
   for(id=0;id<md[ispec].nline;id++)
     A[id] = md[ispec].aeinst[id];
   
   if (par->useEP==2){
+  
+  jbar_grid = malloc(sizeof(double[pIntensity][md[ispec].nline])); 
+  
   //Changing the values to those of the full grid to perform the jbar update
   par->ncell = gp_ncell;
   par->pIntensity = gp_pIntensity; 
@@ -1100,7 +1102,7 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
     popGrid[0][i] = Pops[i];
   }
 
-  struct transitionParams user_data = {NEQ, A, *p, md,ispec,gp,par, *jbar_grid, nMaserWarnings, gp_sorter, subGrid, subGrid_pIntensity}; 
+  struct transitionParams user_data = {NEQ, A, md,ispec,gp,par, *jbar_grid, nMaserWarnings, gp_sorter, subGrid, subGrid_pIntensity}; 
 
   P = abstol = NULL;
   sunMatrix = NULL;
@@ -1232,6 +1234,10 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   SUNMatDestroy(sunMatrix);
   
   gsl_vector_free(newpop);
+  
+  free(popGrid);
+  
+  if (par->useEP==2)
   free(jbar_grid);
 
 }
