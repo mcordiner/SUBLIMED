@@ -14,8 +14,9 @@ TODO:
 
 #include <cvode/cvode.h>               /* prototypes for CVODE fcts., consts.  */
 #include <nvector/nvector_serial.h>    /* access to serial N_Vector            */
-#include <sunmatrix/sunmatrix_dense.h> /* access to dense SUNMatrix            */
-#include <sunlinsol/sunlinsol_dense.h> /* access to dense SUNLinearSolver      */
+#include <sunlinsol/sunlinsol_spgmr.h>   /* access to SPGMR SUNLinearSolver       */
+#include <sunmatrix/sunmatrix_dense.h>   /* access to dense SUNMatrix             */
+#include <sunlinsol/sunlinsol_dense.h>   /* access to dense SUNLinearSolver       */
 #include <sundials/sundials_types.h>   /* defs. of realtype, sunindextype      */
 
 #include "lime.h"
@@ -73,6 +74,12 @@ struct transitionParams{
   int *gp_sorter;
   int subGrid;
   int gp_pIntensity;
+  
+  /* --- NEW CACHING & MEMORY VARIABLES --- */
+  double *p_rates;      // Working matrix allocated once
+  double *coll_rates;   // Radius-dependent rates (cached)
+  double last_radius;   // Track when radius changes
+  double vexp;          // Cached expansion velocity
 };
 
 /* Checks for errors when calling any CVode functions */
@@ -166,6 +173,7 @@ Note that this is called from within the multi-threaded block.
       free(mol[i].vfac);
       free(mol[i].vfac_loc);
     }
+    free(mol);
   }
 }
 
@@ -173,24 +181,6 @@ Note that this is called from within the multi-threaded block.
 void lineBlend(molData *m, configInfo *par, struct blendInfo *blends){
   /*
 This obtains information on all the lines of all the radiating species which have other lines within some cutoff velocity separation.
-
-A variable of type 'struct blendInfo' has a nested structure which can be illustrated diagrammaticaly as follows.
-
-  Structs:  blendInfo   molWithBlends   lineWithBlends    blend
-
-  Variables:  blends
-      .numMolsWithBlends     ____________________
-      .*mols--------------->|.molI               |
-                            |.numLinesWithBlends |   ___________
-                            |.*lines--------------->|.lineI     |
-                            |____________________|  |.numBlends |           ________
-                            |        etc         |  |.*blends------------->|.molJ   |
-                                                    |___________|          |.lineJ  |
-                                                    |    etc    |          |.deltaV |
-                                                                           |________|
-                                                                           |   etc  |
-
-Pointers are indicated by a * before the attribute name and an arrow to the memory location pointed to.
   */
   int molI, lineI, molJ, lineJ;
   int nmwb, nlwb, numBlendsFound, li, bi;
@@ -198,8 +188,6 @@ Pointers are indicated by a * before the attribute name and an arrow to the memo
   struct blend *tempBlends=NULL;
   struct lineWithBlends *tempLines=NULL;
 
-  /* Dimension blends.mols first to the total number of species, then realloc later if need be.
-  */
   (*blends).mols = malloc(sizeof(struct molWithBlends)*par->nSpecies);
   (*blends).numMolsWithBlends = 0;
 
@@ -393,24 +381,11 @@ int
 getNextEdge(double *inidir, const int startGi, const int presentGi\
   , struct grid *gp, const gsl_rng *ran){
   /*
-The idea here is to select for the next grid point, that one which lies closest (with a little randomizing jitter) to the photon track, while requiring the direction of the edge to be in the 'forward' hemisphere of the photon direction.
-
 Note that this is called from within the multi-threaded block.
   */
   int i,ni,niOfSmallest=-1,niOfNextSmallest=-1;
   double dirCos,distAlongTrack,dirFromStart[3],coord,distToTrackSquared,smallest=0.0,nextSmallest=0.0;
   const static double scatterReduction = 0.4;
-  /*
-This affects the ratio of N_2/N_1, where N_2 is the number of times the edge giving the 2nd-smallest distance from the photon track is chosen and N_1 ditto the smallest. Some ratio values obtained from various values of scatterReduction:
-
-  scatterReduction  <N_2/N_1>
-    1.0     0.42
-    0.5     0.75
-    0.4     0.90
-    0.2     1.52
-
-Note that the equivalent ratio value produced by the 1.6 code was 0.91.
-  */
 
   i = 0;
   for(ni=0;ni<gp[presentGi].numNeigh;ni++){
@@ -449,9 +424,7 @@ Note that the equivalent ratio value produced by the 1.6 code was 0.91.
     i++;
   }
 
-  /* Choose the edge to follow.
-  */
-  if(i>1){ /* then nextSmallest, niOfNextSmallest should exist. */
+  if(i>1){
     if((smallest + scatterReduction*nextSmallest)*gsl_rng_uniform(ran)<smallest){
       return niOfNextSmallest;
     }else{
@@ -469,11 +442,6 @@ Note that the equivalent ratio value produced by the 1.6 code was 0.91.
 /*....................................................................*/
 void calcLineAmpPWLin(struct grid *g, const int id, const int k\
   , const int molI, const double deltav, double *inidir, double *vfac_in, double *vfac_out){
-  /*
-Note that this is called from within the multi-threaded block.
-  */
-
-  /* convolution of a Gaussian with a box */
   double binv_this, binv_next, v[5];
 
   binv_this=g[id].mol[molI].binv;
@@ -483,14 +451,6 @@ Note that this is called from within the multi-threaded block.
   v[2]=deltav-dotProduct3D(inidir,&(g[id].v2[3*k]));
   v[3]=deltav-dotProduct3D(inidir,&(g[id].v3[3*k]));
   v[4]=deltav-dotProduct3D(inidir,g[id].neigh[k]->vel);
-
-  /* multiplying by the appropriate binv changes from velocity to doppler widths(?) */
-  /* if the values were be no more than 2 erf table bins apart, we just take a single Gaussian */
-
-  /*
-  vfac_out is the lineshape for the part of the edge in the current Voronoi cell,
-  vfac_in is for the part in the next cell
-  */
 
   if (fabs(v[1]-v[0])*binv_this>(2.0*BIN_WIDTH)) {
      *vfac_out=0.5*geterf(v[0]*binv_this,v[1]*binv_this);
@@ -510,11 +470,6 @@ Note that this is called from within the multi-threaded block.
 /*....................................................................*/
 void calcLineAmpLin(struct grid *g, const int id, const int k\
   , const int molI, const double deltav, double *inidir, double *vfac_in, double *vfac_out){
-  /*
-Note that this is called from within the multi-threaded block.
-  */
-
-  /* convolution of a Gaussian with a box */
   double binv_this, binv_next, v[3];
 
   binv_this=g[id].mol[molI].binv;
@@ -560,8 +515,6 @@ Note that this is called from within the multi-threaded block.
       }
     }
 
-    /* Choose random initial photon direction (the distribution used here is even over the surface of a sphere of radius 1).
-    */
     pt_theta=gsl_rng_uniform(ran)*2*M_PI;
     pt_z=2*gsl_rng_uniform(ran)-1;
     semiradius = sqrt(1.-pt_z*pt_z);
@@ -569,29 +522,17 @@ Note that this is called from within the multi-threaded block.
     inidir[1]=semiradius*sin(pt_theta);
     inidir[2]=pt_z;
 
-    /* Choose the photon frequency/velocity offset.
-    */
     segment=gsl_rng_uniform(ran)-0.5;
-    /*
-    Values of segment should be evenly distributed (considering the
-    entire ensemble of photons) between -0.5 and +0.5.
-    */
 
     for (molI=0;molI<par->nSpecies;molI++){
-      /* Is factor 4.3=[-2.15,2.15] enough?? */
       deltav[molI]=4.3*segment*gp[id].mol[molI].dopb+dotProduct3D(inidir,gp[id].vel);
-      /*
-      This is the local (=evaluated at a grid point, not averaged over the local cell) lineshape.
-      We store this for later use in ALI loops.
-      */
       mp[molI].vfac_loc[iphot]=gaussline(deltav[molI]-dotProduct3D(inidir,gp[id].vel),gp[id].mol[molI].binv);
     }
 
     here = gp[id].id;
 
-    /* Photon propagation loop */
     numLinks=0;
-    while(!gp[here].sink){ /* Testing for sink at loop start is redundant for the first step, since we only start photons from non-sink points, but it makes for simpler code. */
+    while(!gp[here].sink){
       numLinks++;
       if(numLinks>par->ncell){
         if(!silent){
@@ -618,16 +559,10 @@ exit(1);
 
           mp[molI].vfac[iphot]=vfac_out[molI];
         }
-        /*
-        Contribution of the local cell to emission and absorption is done in updateJBar.
-        We only store the vfac for the local cell for use in ALI loops.
-        */
         here=there;
     continue;
       }
 
-      /* If we've got to here, we have progressed beyond the first edge. Length of the new "in" edge is the length of the previous "out".
-      */
       ds_in=ds_out;
       ds_out=0.5*gp[here].ds[neighI]*dotProduct3D(inidir,gp[here].dir[neighI].xn);
 
@@ -651,10 +586,6 @@ exit(1);
           sourceFunc_line(&md[molI],vfac_out[molI],&(gp[here].mol[molI]),lineI,&jnu_line_out,&alpha_line_out);
           sourceFunc_cont(gp[here].mol[molI].cont[lineI],&jnu_cont,&alpha_cont);
 
-          /* cont and blend could use the same alpha and jnu counter, but maybe it's clearer this way */
-
-          /* Line blending part.
-          */
           if(par->blend && blends.mols!=NULL && molI==blends.mols[nextMolWithBlend].molI\
           && lineI==blends.mols[nextMolWithBlend].lines[nextLineWithBlend].lineI){
 
@@ -662,26 +593,20 @@ exit(1);
               molJ  = blends.mols[nextMolWithBlend].lines[nextLineWithBlend].blends[bi].molJ;
               lineJ = blends.mols[nextMolWithBlend].lines[nextLineWithBlend].blends[bi].lineJ;
               velProj = deltav[molI] - blends.mols[nextMolWithBlend].lines[nextLineWithBlend].blends[bi].deltaV;
-        /*  */
+
               if(par->edgeVelsAvailable)
                 calcLineAmpPWLin(gp,here,neighI,molJ,velProj,inidir,&vblend_in,&vblend_out);
               else
                 calcLineAmpLin(gp,here,neighI,molJ,velProj,inidir,&vblend_in,&vblend_out);
 
-        /* we should use also the previous vblend_in, but I don't feel like writing the necessary code now */
               sourceFunc_line(&md[molJ],vblend_out,&(gp[here].mol[molJ]),lineJ,&jnu_blend,&alpha_blend);
-              /* note that sourceFunc* increment jnu and alpha, they don't overwrite it  */
             }
 
             nextLineWithBlend++;
             if(nextLineWithBlend>=blends.mols[nextMolWithBlend].numLinesWithBlends){
               nextLineWithBlend = 0;
-              /* The reason for doing this is as follows. Firstly, we only enter the present IF block if molI has at least 1 line which is blended with others; and further, if we have now processed all blended lines for that molecule. Thus no matter what value lineI takes for the present molecule, it won't appear as blends.mols[nextMolWithBlend].lines[i].lineI for any i. Yet we will still test blends.mols[nextMolWithBlend].lines[nextLineWithBlend], thus we want nextLineWithBlend to at least have a sensible value between 0 and blends.mols[nextMolWithBlend].numLinesWithBlends-1. We could set nextLineWithBlend to any number in this range in safety, but zero is simplest. */
             }
           }
-          /* End of line blending part */
-
-    /* as said above, out-in split should be done also for blended lines... */
 
     dtau=(alpha_line_out+alpha_cont+alpha_blend)*ds_out;
           if(dtau < -MAX_NEG_OPT_DEPTH) dtau = -MAX_NEG_OPT_DEPTH;
@@ -703,7 +628,7 @@ exit(1);
           }
 
           iline++;
-        } /* Next line this molecule. */
+        }
 
         if(par->blend && blends.mols!=NULL && molI==blends.mols[nextMolWithBlend].molI)
           nextMolWithBlend++;
@@ -712,8 +637,6 @@ exit(1);
       here=there;
     };
 
-    /* Add cmb contribution.
-    */
     iline = 0;
     for(molI=0;molI<par->nSpecies;molI++){
       for(lineI=0;lineI<md[molI].nline;lineI++){
@@ -747,27 +670,19 @@ Note that this is called from within the multi-threaded block.
         sourceFunc_line(&md[molI],mp[molI].vfac[iphot],&(gp[posn].mol[molI]),lineI,&jnu,&alpha);
         sourceFunc_cont(gp[posn].mol[molI].cont[lineI],&jnu,&alpha);
 
-        /* Line blending part.
-        */
         if(par->blend && blends.mols!=NULL && molI==blends.mols[nextMolWithBlend].molI\
         && lineI==blends.mols[nextMolWithBlend].lines[nextLineWithBlend].lineI){
           for(bi=0;bi<blends.mols[nextMolWithBlend].lines[nextLineWithBlend].numBlends;bi++){
             molJ  = blends.mols[nextMolWithBlend].lines[nextLineWithBlend].blends[bi].molJ;
             lineJ = blends.mols[nextMolWithBlend].lines[nextLineWithBlend].blends[bi].lineJ;
-            /*
-            The next line is not quite correct, because vfac may be different for other molecules due to different values of binv. Unfortunately we don't necessarily have vfac for molJ available yet.
-            */
             sourceFunc_line(&md[molJ],mp[molI].vfac[iphot],&(gp[posn].mol[molJ]),lineJ,&jnu,&alpha);
-      /* note that sourceFunc* increment jnu and alpha, they don't overwrite it  */
           }
 
           nextLineWithBlend++;
           if(nextLineWithBlend>=blends.mols[nextMolWithBlend].numLinesWithBlends){
             nextLineWithBlend = 0;
-            /* The reason for doing this is as follows. Firstly, we only enter the present IF block if molI has at least 1 line which is blended with others; and further, if we have now processed all blended lines for that molecule. Thus no matter what value lineI takes for the present molecule, it won't appear as blends.mols[nextMolWithBlend].lines[i].lineI for any i. Yet we will still test blends.mols[nextMolWithBlend].lines[nextLineWithBlend], thus we want nextLineWithBlend to at least have a sensible value between 0 and blends.mols[nextMolWithBlend].numLinesWithBlends-1. We could set nextLineWithBlend to any number in this range in safety, but zero is simplest. */
           }
         }
-        /* End of line blending part */
 
         dtau=alpha*halfFirstDs[iphot];
         calcSourceFn(dtau, par, &remnantSnu, &expDTau);
@@ -797,128 +712,145 @@ void lteOnePoint(molData *md, const int ispec, const double temp, double *pops){
 
 
 /*....................................................................*/
-
 void
-getTransitionRates(molData *md, int ispec, struct grid *gp, configInfo *par, int NEQ, double A[NEQ-1], double *p, double radius, double *jbar_grid, double *Pops, int *nMaserWarnings, int *gp_sorter, int subGrid, int subGrid_pIntensity, double vexp){
-  int itemp,ipart,t_binlow,iline,k,l,ti, li, upper, lower, j,tnint=-1;
-  double rnuc, Te, ne, aij, sigmaij, ve, bessel, ceij, gij, ceji, dens[md[ispec].npart], tkin[md[ispec].npart], LTEpops[md[ispec].nlev];
-  double jbar[par->pIntensity], interp_coeff, Qwater;
-  double vkin,collRate;
+getTransitionRates(struct transitionParams *user_data, double radius, double *Pops){
+  
+  int itemp,ipart,t_binlow,iline,k,l,ti, li, upper, lower, tnint=-1;
+  double rnuc, Te, ne, aij, sigmaij, ve, bessel, ceij, gij, ceji;
+  double interp_coeff, Qwater, vkin, collRate, tau, beta;
+  
+  molData *md = user_data->md;
+  int ispec = user_data->ispec;
+  configInfo *par = user_data->par;
+  struct grid *gp = user_data->gp;
+  int NEQ = user_data->array_size;
+  double *A = user_data->A_array;
+  
+double *p = user_data->p_rates;
+  double *coll_rates = user_data->coll_rates;
 
-  rnuc = par->minScale;
-  density(0.0,0.0,subGrid*radius,dens);
-  temperature(0.0,0.0,subGrid*radius,tkin);
-  lteOnePoint(md, ispec, tkin[0], LTEpops);
+  /* 1. ONLY RECALCULATE COLLISIONS IF RADIUS HAS CHANGED (Optimization) */
+  if (radius != user_data->last_radius) {
+    double dens[md[ispec].npart], tkin[md[ispec].npart], LTEpops[md[ispec].nlev];
+    
+    rnuc = par->minScale;
+    density(0.0,0.0,user_data->subGrid*radius,dens);
+    temperature(0.0,0.0,user_data->subGrid*radius,tkin);
+    lteOnePoint(md, ispec, tkin[0], LTEpops);
+    
+    double vel[3];
+    velocity(0.,0.,user_data->subGrid*radius,vel);
+    user_data->vexp = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
+    if (user_data->vexp < 1e-10) user_data->vexp = 1e-10; /* Prevent divide-by-zero */
+    
+    /* Initialize matrix with zeros */
+    if(md[ispec].nlev<=0){
+      if(!silent) bail_out("Matrix initialization error in solveStatEq");
+      exit(1);
+    }
+    for(k=0; k < NEQ*NEQ; k++) coll_rates[k] = 0.0;
+    
+    /* Populate matrix with collisional transitions */
+    for(ipart=0;ipart<md[ispec].npart;ipart++){
+      struct cpData part = md[ispec].part[ipart];
+      double *downrates = part.down;
+      int di = md[ispec].part[ipart].densityIndex;
+      if (di<0) continue;
 
-  /* Initialize matrix with zeros */
-  if(md[ispec].nlev<=0){
-    if(!silent) bail_out("Matrix initialization error in solveStatEq");
-    exit(1);
+      /* Collision temperature interpolation coefficients */
+      if((tkin[ipart]>part.temp[0])&&(tkin[ipart]<part.temp[part.ntemp-1])){
+        for(itemp=0;itemp<part.ntemp-1;itemp++){
+          if((tkin[ipart]>part.temp[itemp])&&(tkin[ipart]<=part.temp[itemp+1])){
+            tnint=itemp;
+          }
+        }
+        interp_coeff =(tkin[ipart]-part.temp[tnint])/(part.temp[tnint+1]-part.temp[tnint]);
+        t_binlow = tnint;
+      } else if(tkin[ipart]<=part.temp[0]) {
+        t_binlow = 0;
+        interp_coeff = 0.0;
+      } else {
+        t_binlow = part.ntemp-2;
+        interp_coeff = 1.0;
+      }
+
+      if (part.ntrans > 0){
+        /* Use the LAMDA collision rates, if provided in the input file */ 
+        for(ti=0;ti<part.ntrans;ti++){
+          int coeff_index = ti*part.ntemp + t_binlow;
+          double down = downrates[coeff_index] + interp_coeff*(downrates[coeff_index+1] - downrates[coeff_index]);
+          double up = down*md[ispec].gstat[part.lcu[ti]]/md[ispec].gstat[part.lcl[ti]]
+                    *exp(-HCKB*(md[ispec].eterm[part.lcu[ti]]-md[ispec].eterm[part.lcl[ti]])/tkin[ipart]);
+
+          coll_rates[part.lcu[ti] * NEQ + part.lcl[ti]] += down*dens[ipart];
+          coll_rates[part.lcl[ti] * NEQ + part.lcu[ti]] += up*dens[ipart];
+        }
+      } else {
+        /* Otherwise use the Meudon approximation */
+        vkin = sqrt(8.0*KBOLTZ*tkin[ipart]/PI * (1.0/md[ispec].amass + 1.0/MATM));
+        collRate = dens[ipart]*vkin*XSEC*par->colliScale;
+        /* CACHE OPTIMIZATION: Swapped l and k loops to prevent cache misses */
+        for(l=0;l<md[ispec].nlev;l++){
+          for(k=0;k<md[ispec].nlev;k++){
+            coll_rates[l * NEQ + k] += collRate * LTEpops[k];  
+          }
+        }
+      }
+    }  
+    
+    /*GENERATE ELECTRON COLLISIONAL RATES (only for gas 0) AND ADD TO MATRIX*/
+    //Presently, only electrons produced from collision parter 0 are considered.
+    //It would be easy enough to add others, but the partner production rates would be needed as an input
+    //parameter, like par->Qpartner, and their temperatures can be given as tkin[n] from temperature()
+    /*Formalism of Zakharov et al. (2007)*/
+    if(user_data->subGrid==SUBGRID1) Qwater = par->Q1;
+    else Qwater = par->Q2;
+
+    Te = Telec(radius,Qwater,tkin[0]); 
+    ne = nelec(radius,Qwater,user_data->vexp,Te,par->rHelio,par->xne); 
+     
+    for(iline=0;iline<md[ispec].nline;iline++){
+      aij = HPLANCK*md[ispec].freq[iline]/2./KBOLTZ/Te;
+      sigmaij = ELEC_MASS*pow(ELEC_CHARGE,2)*pow(CLIGHT,3)*md[ispec].aeinst[iline]/16./pow(PI,2)/EPS_0/pow(HPLANCK,2)/pow(md[ispec].freq[iline],4);
+      ve = sqrt(8.*KBOLTZ*Te/PI/ELEC_MASS);
+      bessel = gsl_sf_bessel_K0(aij);
+      ceij = ne*ve*sigmaij*2.*aij*exp(aij)*bessel;
+      gij = md[ispec].gstat[md[ispec].lau[iline]]/md[ispec].gstat[md[ispec].lal[iline]];
+      ceji = ne*ve*gij*sigmaij*2.*aij*exp(-aij)*bessel;
+
+      coll_rates[md[ispec].lau[iline] * NEQ + md[ispec].lal[iline]] += ceij;
+      coll_rates[md[ispec].lal[iline] * NEQ + md[ispec].lau[iline]] += ceji;
+    }
+
+    /* Add the pumping rates to the matrix */
+    if(par->girdatfile!=NULL){
+      /* CACHE OPTIMIZATION: Swapped l and k loops to prevent cache misses */
+      for(l=0;l<md[ispec].nlev;l++){
+        for(k=0;k<md[ispec].nlev;k++){
+          if(k!=l) coll_rates[l * NEQ + k] += md[ispec].gir[l*md[ispec].nlev+k];
+        }
+      }
+    }
+    
+    user_data->last_radius = radius;
   }
 
-  for(k=0;k<md[ispec].nlev;k++)
-    for(l=0;l<md[ispec].nlev;l++)
-      p[k * NEQ + l] = 0.0;
+  /* 2. COPY CACHED RATES TO WORKING MATRIX */
+  for(k=0; k < NEQ*NEQ; k++) p[k] = coll_rates[k];
 
-  /* Populate matrix with collisional transitions */
-  for(ipart=0;ipart<md[ispec].npart;ipart++){
-    struct cpData part = md[ispec].part[ipart];
-    double *downrates = part.down;
-    int di = md[ispec].part[ipart].densityIndex;
-    if (di<0) continue;
-
-  /* Collision temperature interpolation coefficients */
-    if((tkin[ipart]>part.temp[0])&&(tkin[ipart]<part.temp[part.ntemp-1])){
-            for(itemp=0;itemp<part.ntemp-1;itemp++){
-              if((tkin[ipart]>part.temp[itemp])&&(tkin[ipart]<=part.temp[itemp+1])){
-                tnint=itemp;
-              }
-            }
-            interp_coeff =(tkin[ipart]-part.temp[tnint])/(part.temp[tnint+1]-part.temp[tnint]);
-            t_binlow = tnint;
-
-    } else if(tkin[ipart]<=part.temp[0]) {
-      t_binlow = 0;
-      interp_coeff = 0.0;
-    } else {
-      t_binlow = part.ntemp-2;
-      interp_coeff = 1.0;
-    }
-
-   if (part.ntrans > 0){
-   /* Use the LAMDA collision rates, if provided in the input file */ 
-    for(ti=0;ti<part.ntrans;ti++){
-      int coeff_index = ti*part.ntemp + t_binlow;
-      double down = downrates[coeff_index]\
-                  + interp_coeff*(downrates[coeff_index+1] - downrates[coeff_index]);
-      double up = down*md[ispec].gstat[part.lcu[ti]]/md[ispec].gstat[part.lcl[ti]]\
-                *exp(-HCKB*(md[ispec].eterm[part.lcu[ti]]-md[ispec].eterm[part.lcl[ti]])/tkin[ipart]);
-
-      p[part.lcu[ti] * NEQ + part.lcl[ti]] = p[part.lcu[ti] * NEQ + part.lcl[ti]] + down*dens[ipart];
-      p[part.lcl[ti] * NEQ + part.lcu[ti]] = p[part.lcl[ti] * NEQ + part.lcu[ti]] + up*dens[ipart];
-    }
-   }else{
-   /* Otherwise use the Meudon approximation */
-     vkin = sqrt(8.0*KBOLTZ*tkin[ipart]/PI * (1.0/md[ispec].amass + 1.0/MATM));
-     collRate = dens[ipart]*vkin*XSEC*par->colliScale;
-     for(k=0;k<md[ispec].nlev;k++){
-        for(l=0;l<md[ispec].nlev;l++){
-          p[l * NEQ + k] = p[l * NEQ + k] + collRate * LTEpops[k];  
-        }
-     }
-
-   }
-
-  }  
-  /*GENERATE ELECTRON COLLISIONAL RATES (only for gas 0) AND ADD TO MATRIX*/
-  //Presently, only electrons produced from collision parter 0 are considered.
-  //It would be easy enough to add others, but the partner production rates would be needed as an input
-  //parameter, like par->Qpartner, and their temperatures can be given as tkin[n] from temperature()
-  /*Formalism of Zakharov et al. (2007)*/
-
-   if(subGrid==SUBGRID1){
-    Qwater = par->Q1;
-   }else{
-    Qwater = par->Q2;
-   }
-
-   Te = Telec(radius,Qwater,tkin[0]); 
-   ne = nelec(radius,Qwater,vexp,Te,par->rHelio,par->xne); 
-   
-   for(iline=0;iline<md[ispec].nline;iline++){
-     aij = HPLANCK*md[ispec].freq[iline]/2./KBOLTZ/Te;
-     sigmaij = ELEC_MASS*pow(ELEC_CHARGE,2)*pow(CLIGHT,3)*md[ispec].aeinst[iline]/16./pow(PI,2)/EPS_0/pow(HPLANCK,2)/pow(md[ispec].freq[iline],4);
-     ve = sqrt(8.*KBOLTZ*Te/PI/ELEC_MASS);
-     bessel = gsl_sf_bessel_K0(aij);
-     ceij = ne*ve*sigmaij*2.*aij*exp(aij)*bessel;
-     gij = md[ispec].gstat[md[ispec].lau[iline]]/md[ispec].gstat[md[ispec].lal[iline]];
-     ceji = ne*ve*gij*sigmaij*2.*aij*exp(-aij)*bessel;
-
-     p[md[ispec].lau[iline] * NEQ + md[ispec].lal[iline]] = p[md[ispec].lau[iline] * NEQ + md[ispec].lal[iline]] + ceij;
-     p[md[ispec].lal[iline] * NEQ + md[ispec].lau[iline]] = p[md[ispec].lal[iline] * NEQ + md[ispec].lau[iline]] + ceji;
-
-   }
-
-   /* Add the pumping rates to the matrix */
-   for(k=0;k<md[ispec].nlev;k++)
-    for(l=0;l<md[ispec].nlev;l++)
-      if(par->girdatfile!=NULL)
-        if(k!=l){
-          if(par->girdatfile!=NULL)
-            p[l * NEQ + k] = p[l * NEQ + k] + md[ispec].gir[l*md[ispec].nlev+k];
-        }
-
-   //Radiation trapping using the Escape Probability method
-   if(par->useEP==1){ 
-   double tau, beta, molDens[par->nSpecies];
-
-   molNumDensity(0.0,0.0,subGrid*radius,molDens); 
+  //Radiation trapping using the Escape Probability method
+  if(par->useEP==1){ 
+    double molDens[par->nSpecies];
+    molNumDensity(0.0,0.0,user_data->subGrid*radius,molDens); 
+    
     for(li=0;li<md[ispec].nline;li++){
       upper=md[ispec].lau[li];
       lower=md[ispec].lal[li];
 
       //Calculating the optical depth
-      tau = ((A[li]*pow(CLIGHT,3))/(8*PI*pow(md[ispec].freq[li],3))) * ((md[ispec].gstat[upper]/md[ispec].gstat[lower])*Pops[lower] - Pops[upper]) * ((molDens[ispec]* radius)/vexp);
+      tau = ((A[li]*pow(CLIGHT,3))/(8*PI*pow(md[ispec].freq[li],3))) * 
+            ((md[ispec].gstat[upper]/md[ispec].gstat[lower])*Pops[lower] - Pops[upper]) * 
+            ((molDens[ispec]* radius)/user_data->vexp);
 
       //If the optical depth is small, ignore it
       if (tau > -1.0e-6 && tau < 1.0e-6){
@@ -928,46 +860,42 @@ getTransitionRates(molData *md, int ispec, struct grid *gp, configInfo *par, int
       }else if (tau<0.0){ 
         beta = (1 - exp(-tau)) / tau;
       }
-
-      p[upper * NEQ + lower] = p[upper * NEQ + lower] + A[li]*beta;
-
+      p[upper * NEQ + lower] += A[li]*beta;
     }//end for
   }//end if
-
   //No photon trapping simulation
   else if(par->useEP==0){
     for(li=0;li<md[ispec].nline;li++){
       upper=md[ispec].lau[li];
       lower=md[ispec].lal[li];
-      p[upper * NEQ + lower] = p[upper * NEQ + lower] + A[li];
+      p[upper * NEQ + lower] += A[li];
     }
-  
+  }
   //Calculate photon trapping self-consistently, using full 3D treatment of radiation field, and photon propagation
-  }else if(par->useEP==2){
-
-  if(radius >= gp[gp_sorter[subGrid_pIntensity-1]].radius){
-    for(li=0;li<md[ispec].nline;li++){
-      upper=md[ispec].lau[li];
-      lower=md[ispec].lal[li];
-  // Note - this is broken as jbar_grid should refer to the current subgrid, not the total grid, and we should be choosing the closest grid point to the cone center, relative to our present radius     
-      p[upper * NEQ + lower] = p[upper * NEQ + lower] + md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
-      p[lower * NEQ + upper] = p[lower * NEQ + upper] + md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
+  else if(par->useEP==2){
+    int gp_pIntensity = user_data->gp_pIntensity;
+    int *gp_sorter = user_data->gp_sorter;
+    double *jbar_grid = user_data->jbar_grid;
+    
+    if(radius >= gp[gp_sorter[gp_pIntensity-1]].radius){
+      for(li=0;li<md[ispec].nline;li++){
+        upper=md[ispec].lau[li];
+        lower=md[ispec].lal[li];
+        // Note - this is broken as jbar_grid should refer to the current subgrid, not the total grid, and we should be choosing the closest grid point to the cone center, relative to our present radius     
+        p[upper * NEQ + lower] += md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
+        p[lower * NEQ + upper] += md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
+      }
+    } else {
+      for(li=0;li<md[ispec].nline;li++){
+        upper=md[ispec].lau[li];
+        lower=md[ispec].lal[li];
+        // Note - this calculation is badly broken as jbar_grid should refer to the current subgrid, not the total grid, and we should be choosing the closest grid point to the cone center, relative to our present radius... (par->pIntensity-1) is used only as a placeholder grid point, to allow the code to run without causing major problems
+        p[upper * NEQ + lower] += md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
+        p[lower * NEQ + upper] += md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
+      }
     }
-  }
-
-
-  else{
-    for(li=0;li<md[ispec].nline;li++){
-      upper=md[ispec].lau[li];
-      lower=md[ispec].lal[li];
-  // Note - this calculation is badly broken as jbar_grid should refer to the current subgrid, not the total grid, and we should be choosing the closest grid point to the cone center, relative to our present radius... (par->pIntensity-1) is used only as a placeholder grid point, to allow the code to run without causing major problems
-      p[upper * NEQ + lower] = p[upper * NEQ + lower] + md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
-      p[lower * NEQ + upper] = p[lower * NEQ + upper] + md[ispec].beinstl[li]*jbar_grid[(par->pIntensity-1) * md[ispec].nline + li];
-    }
-  }
   }
 }
-
 
 /*....................................................................*/
 void
@@ -987,126 +915,206 @@ LTE(configInfo *par, struct grid *gp, molData *md){
 /* Sets the Differential Equation (Pdot) to be solved by CVode */
 int f(realtype radius, N_Vector P, N_Vector Pdot, void *data){
 
-  int i, j, NEQ, id;
+  int i, j, NEQ;
   struct transitionParams *user_data = data;
-  NEQ = user_data -> array_size;
-  double *p;
-  double Pops_array[NEQ], vel[DIM], vexp;
+  NEQ = user_data->array_size;
+  double *p = user_data->p_rates;
+  double Pops_array[NEQ];
 
-  p = malloc(sizeof(double[NEQ][NEQ]));
-
-  velocity(0.,0.,user_data->subGrid*radius,vel);
-  vexp = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]);
-
-  //Pasing P values to Pops_array for readability
+  // Passing P values to Pops_array for readability
   for(i=0; i < NEQ; ++i)
     Pops_array[i] = Ith(P,i);
 
-  getTransitionRates(user_data->md,user_data->ispec,user_data->gp,user_data->par, NEQ, user_data -> A_array, p, radius, user_data->jbar_grid, Pops_array, user_data->nMaserWarnings, user_data->gp_sorter, user_data->subGrid, user_data->gp_pIntensity, vexp);
+  // Call the updated function
+  getTransitionRates(user_data, radius, Pops_array);
 
-  //Initializing Pdot (otherwise it stores previous values between calls to CVode)
+  // Initialize Pdot
   for(i=0; i < NEQ; ++i)
     Ith(Pdot,i) = 0.0;
 
-  //Setting Pdot
-  for(i=0; i < NEQ; ++i)
-    for(j=0; j < NEQ; ++j){
-      if(i != j) 
-        Ith(Pdot,i) = Ith(Pdot,i) + (Pops_array[j] * (p[j* NEQ +i])) - (Pops_array[i] * p[i * NEQ +j]);
+  // Cache-friendly matrix-vector product
+  
+  // 1. Add population coming FROM j TO i
+  for(j=0; j < NEQ; ++j){
+    double pop_j = Pops_array[j];
+    for(i=0; i < NEQ; ++i){
+      if(i != j) {
+        Ith(Pdot,i) += pop_j * p[j * NEQ + i];
+      }
     }
-   
-     // Multiply equations by 1/V to get dP/dr     
+  }
+
+  // 2. Subtract population going FROM i TO j
   for(i=0; i < NEQ; ++i){
-     Ith(Pdot,i) = Ith(Pdot,i) / vexp;
-    //  Prind the Pdots for debugging
-    //  printf("%d %le\n",i,  Ith(Pdot,i));
-   }
+    double pop_i = Pops_array[i];
+    double out_rate_sum = 0.0;
+    for(j=0; j < NEQ; ++j){
+      if(i != j) {
+        out_rate_sum += p[i * NEQ + j];
+      }
+    }
+    Ith(Pdot,i) -= pop_i * out_rate_sum;
+  }
+   
+  // Multiply equations by 1/V to get dP/dr     
+  double inv_vexp = 1.0 / user_data->vexp;
+  for(i=0; i < NEQ; ++i){
+     Ith(Pdot,i) *= inv_vexp;
+  }
  
-  free(p);  
   return(0);
 }
 
-void reduceTol(N_Vector abstol, realtype reltol, void *cvode_mem, double factor, int NEQ){
+/*....................................................................*/
+/* reduceTol: NOW TAKES reltol BY REFERENCE.
+   Previously reltol was passed by value, so the *reltol in the caller
+   (solveStatEq) never actually decreased - only abstol (passed by pointer)
+   did. This meant the surrounding while(cvstatus<0 && reltol>MINTOL) loop
+   in solveStatEq checked a stale value and risked looping indefinitely.
+   The caller now does "reduceTol(abstol, &reltol, ...)" and no longer
+   needs its own separate "reltol *= 0.1" afterwards. */
+void reduceTol(N_Vector abstol, realtype *reltol, void *cvode_mem, double factor, int NEQ){
    printf("INFO: Reducing RTOL and ATOL by 0.1 and restarting CVODE\n");
    int i, retval;
 
    for(i=0; i < NEQ; ++i){
       Ith(abstol,i) = Ith(abstol,i) * factor;
-  }
+   }
 
-   reltol = reltol * factor;
-   
-  retval = CVodeSVtolerances(cvode_mem, reltol, abstol);
-  if (check_retval(&retval, "CVodeSVtolerances", 1)) return;
+   *reltol = (*reltol) * factor;
 
+   retval = CVodeSVtolerances(cvode_mem, *reltol, abstol);
+   if (check_retval(&retval, "CVodeSVtolerances", 1)) return;
 }
 
+/*....................................................................*/
+/* Exact Jacobian-times-vector product, for use with CVodeSetJacTimes.
+
+   VALID when par->useEP == 0 OR par->useEP == 2: in both cases the rate
+   matrix p does not depend on the current population vector Pops (for
+   useEP==2, p depends only on jbar_grid and radius, not Pops), so
+   f(t,P) is exactly linear: f = (1/vexp)*p^T*P, and J = (1/vexp)*p^T
+ */
+
+int JacTimesVec(N_Vector v, N_Vector Jv, realtype t, N_Vector P, N_Vector fP,
+                 void *user_data_ptr, N_Vector tmp){
+
+  struct transitionParams *user_data = user_data_ptr;
+  int NEQ   = user_data->array_size;
+  double *p = user_data->p_rates;
+  int i,j;
+
+  for(i=0; i < NEQ; ++i)
+    Ith(Jv,i) = 0.0;
+
+  /* Contribution flowing FROM j TO i */
+  for(j=0; j < NEQ; ++j){
+    double v_j = Ith(v,j);
+    for(i=0; i < NEQ; ++i){
+      if(i != j)
+        Ith(Jv,i) += v_j * p[j * NEQ + i];
+    }
+  }
+
+  /* Contribution flowing FROM i TO j (subtracted) */
+  for(i=0; i < NEQ; ++i){
+    double out_rate_sum = 0.0;
+    for(j=0; j < NEQ; ++j){
+      if(i != j)
+        out_rate_sum += p[i * NEQ + j];
+    }
+    Ith(Jv,i) -= Ith(v,i) * out_rate_sum;
+  }
+
+  double inv_vexp = 1.0 / user_data->vexp;
+  for(i=0; i < NEQ; ++i)
+    Ith(Jv,i) *= inv_vexp;
+
+  return 0;
+}
 
 /*....................................................................*/
 void
 solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   , struct blendInfo blends, int *nextMolWithBlend, gridPointData **mp\
   , double **halfFirstDs, int *nMaserWarnings,struct grid *gp3D,int gp_pIntensity, int gp_ncell, double *radii, int subGrid_pIntensity, int *gp_sorter, int subGrid){
+  
   int id;
   realtype reltol, t;
   N_Vector P, abstol;
-  SUNMatrix sunMatrix;
-  SUNLinearSolver LS;
   void *cvode_mem;
-  int i,j,k, cvodeErrs = 0;;
-  int retval,cvstatus,index;
-  int ncell = par->ncell, pIntensity = par->pIntensity;
+  int i, j, k, cvodeErrs = 0;
+  int retval, cvstatus, index;
+  
+  /* THREAD SAFETY FIX: Create a local copy of par to prevent Race Conditions */
+  configInfo local_par = *par;
+  
+  int ncell = local_par.ncell, pIntensity = local_par.pIntensity;
 
-  gsl_vector *newpop = gsl_vector_alloc(md[ispec].nlev);
   /* Initializing parameters to be used by CVode */
-  int NEQ = md[ispec].nlev; // Number of Equations .
-  double A[md[ispec].nline]; //Einstein As
-  double Pops[NEQ]; //Level Populations
-  double (*popGrid)[NEQ]; //Populations as a function of radius 
-  double (*jbar_grid)[md[ispec].nline];
+  int NEQ = md[ispec].nlev; // Number of Equations
+  double A[md[ispec].nline]; // Einstein As
+  double Pops[NEQ]; // Level Populations
+  double (*popGrid)[NEQ]; // Populations as a function of radius 
+  double (*jbar_grid)[md[ispec].nline] = NULL;
   
   popGrid = malloc(sizeof(double[NRADS][NEQ]));
   
   for(id=0;id<md[ispec].nline;id++)
     A[id] = md[ispec].aeinst[id];
   
-  if (par->useEP==2){
+  if (local_par.useEP==2){
+    jbar_grid = malloc(sizeof(double[pIntensity][md[ispec].nline])); 
   
-  jbar_grid = malloc(sizeof(double[pIntensity][md[ispec].nline])); 
-  
-  //Changing the values to those of the full grid to perform the jbar update
-  par->ncell = gp_ncell;
-  par->pIntensity = gp_pIntensity; 
+    // Changing the values to those of the full grid to perform the jbar update
+    local_par.ncell = gp_ncell;
+    local_par.pIntensity = gp_pIntensity; 
 
-    for(id=0;id<par->pIntensity;id++){
-      updateJBar(id,md,gp3D,ispec,par,blends,nextMolWithBlend[id],mp[id],halfFirstDs[id]);
+    for(id=0;id<local_par.pIntensity;id++){
+      updateJBar(id, md, gp3D, ispec, &local_par, blends, nextMolWithBlend[id], mp[id], halfFirstDs[id]);
     }
-    for(i=0;i<par->pIntensity;i++){
-      for(j=0;j<md[ispec].nline;j++){
-          for(k=0;k<gp_pIntensity;k++){
-            if(gp3D[i].id==gp[k].id) //we use the .id parameter to to the mapping between the grid points in the full grid and the subgrids
-              break;
-          }
-        jbar_grid[k][j] = mp[i][ispec].jbar[j];
-      }
+    for(i=0;i<local_par.pIntensity;i++){
+        // OPTIMIZATION: Hoist k_match search out of the j-loop
+        int k_match = 0;
+        for(k=0;k<gp_pIntensity;k++){
+            if(gp3D[i].id==gp[k].id){ 
+                k_match = k;
+                break;
+            }
+        }
+        for(j=0;j<md[ispec].nline;j++){
+            jbar_grid[k_match][j] = mp[i][ispec].jbar[j];
+        }
     }
-  //Reverting to the original values in case they were changed when useEP==2
-  par->ncell = ncell;
-  par->pIntensity = pIntensity;
+    // Reverting to the original values
+    local_par.ncell = ncell;
+    local_par.pIntensity = pIntensity;
   }
 
-  /*Initializing Pops */
+  /* Initializing Pops */
   for(i=0;i<md[ispec].nlev;i++){
     Pops[i] = gp[gp_sorter[0]].mol[ispec].pops[i]; 
     popGrid[0][i] = Pops[i];
   }
 
-  struct transitionParams user_data = {NEQ, A, md,ispec,gp,par, *jbar_grid, nMaserWarnings, gp_sorter, subGrid, subGrid_pIntensity}; 
+  /* ALLOCATE CACHED MATRICES ONCE */
+  double *p_rates = malloc(sizeof(double) * NEQ * NEQ);
+  double *coll_rates = malloc(sizeof(double) * NEQ * NEQ);
+
+  /* Pass the local_par into user_data to maintain thread safety */
+  struct transitionParams user_data = {
+      NEQ, A, md, ispec, gp, &local_par, (double *)jbar_grid, nMaserWarnings, gp_sorter, 
+      subGrid, subGrid_pIntensity, 
+      p_rates, coll_rates, -1.0, 1.0 /* initializers for caching */
+  }; 
 
   P = abstol = NULL;
-  sunMatrix = NULL;
-  LS = NULL;
   cvode_mem = NULL;
+  
+  /* Fallback solver variables */
+  SUNLinearSolver LS = NULL;
+  SUNMatrix sunMatrix = NULL;
+  int using_dense; 
 
   /* Create serial vector of length NEQ for I.C. and abstol */
   P = N_VNew_Serial(NEQ);
@@ -1117,51 +1125,64 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   /* Set the scalar relative tolerance */
   reltol = RTOL;
 
-  /* Set the initial population values and the tolerances*/
   for(i=0; i < NEQ; ++i){
     Ith(P,i) = Pops[i];
     Ith(abstol,i) = ATOL;
   }
 
-  /* Call CVodeCreate to create the solver memory and specify the 
-  * Backward Differentiation Formula */
   cvode_mem = CVodeCreate(CV_BDF);
   if (check_retval((void *)cvode_mem, "CVodeCreate", 0)) return;
 
-  /* Call CVodeInit to initialize the integrator memory and specify the
-   * user's right hand side function in y'=f(t,y), the inital time T0, and
-   * the initial dependent variable vector y. */
-  retval = CVodeInit(cvode_mem, f,  radii[0], P);
+  retval = CVodeInit(cvode_mem, f, radii[0], P);
   if (check_retval(&retval, "CVodeInit", 1)) return;
 
   retval = CVodeSetUserData(cvode_mem, &user_data);
   if (check_retval(&retval, "CVodeSetUserData", 0)) return;
 
-  /* Call CVodeSVtolerances to specify the scalar relative tolerance
-   * and vector absolute tolerances */
   retval = CVodeSVtolerances(cvode_mem, reltol, abstol);
   if (check_retval(&retval, "CVodeSVtolerances", 1)) return;
 
   retval = CVodeSetMaxNumSteps(cvode_mem, 5000);
-    if (check_retval(&retval, "CVodeSetMaxNumSteps", 1)) return;
+  if (check_retval(&retval, "CVodeSetMaxNumSteps", 1)) return;
 
-  /* Create dense SUNMatrix for use in linear solves */
-  sunMatrix = SUNDenseMatrix(NEQ, NEQ);
-  if(check_retval((void *)sunMatrix, "SUNDenseMatrix", 0)) return;
+  /* --- SOLVER SELECTION ---
+     Force Dense whenever useEP==1: the escape-probability term makes p
+     depend on Pops (nonlinear system), invalidating JacTimesVec. Note this
+     is deliberately useEP==1 specifically, NOT useEP>0 - useEP==2 (full 3D
+     photon trapping via jbar_grid) does NOT depend on Pops and is safe for
+     SPGMR+exact-Jacobian, same as useEP==0. For useEP==0 or useEP==2,
+     prefer SPGMR above DENSE_NEQ_CUTOFF, backed by the exact
+     Jacobian-vector product and a widened Krylov subspace (20, rather
+     than SUNDIALS' small default) to guard against the convergence
+     failures that made SPGMR's earlier (FD-Jacobian) behaviour unreliable. */
+  int forceDense = (local_par.useEP == 1);
 
-  /* Create dense SUNLinearSolver object for use by CVode */
-  LS = SUNLinSol_Dense(P, sunMatrix);
-  if(check_retval((void *)LS, "SUNLinSol_Dense", 0)) return;
+  if (!forceDense && NEQ > DENSE_NEQ_CUTOFF) {
+    using_dense = 0;
+    LS = SUNLinSol_SPGMR(P, PREC_NONE, 20);
+    if(check_retval((void *)LS, "SUNLinSol_SPGMR", 0)) return;
 
-  /* Call CVodeSetLinearSolver to attach the matrix and linear solver to CVode */
-  retval = CVodeSetLinearSolver(cvode_mem, LS, sunMatrix);
-  if(check_retval(&retval, "CVodeSetLinearSolver", 1)) return;
+    retval = CVodeSetLinearSolver(cvode_mem, LS, NULL);
+    if(check_retval(&retval, "CVodeSetLinearSolver", 1)) return;
 
-  /* Set the user-supplied Jacobian routine Jac */
-  //retval = CVodeSetJacFn(cvode_mem, Jac);
-  //if(check_retval(&retval, "CVodeSetJacFn", 1)) return;
+    retval = CVodeSetJacTimes(cvode_mem, NULL, JacTimesVec);
+    if(check_retval(&retval, "CVodeSetJacTimes", 1)) return;
+  } else {
+    using_dense = 1;
+    sunMatrix = SUNDenseMatrix(NEQ, NEQ);
+    if(check_retval((void *)sunMatrix, "SUNDenseMatrix", 0)) return;
 
-  /* Use a difference quotient Jacobian */
+    LS = SUNLinSol_Dense(P, sunMatrix);
+    if(check_retval((void *)LS, "SUNLinSol_Dense", 0)) return;
+
+    retval = CVodeSetLinearSolver(cvode_mem, LS, sunMatrix);
+    if(check_retval(&retval, "CVodeSetLinearSolver", 1)) return;
+  }
+
+  printf("Linear solver selected for sub-grid %d, species %d: %s (NEQ=%d, useEP=%d)\n",
+         subGrid, ispec, using_dense ? "Dense" : "Krylov", NEQ, local_par.useEP);
+  fflush(stdout);
+
   retval = CVodeSetJacFn(cvode_mem, NULL);
   if(check_retval(&retval, "CVodeSetJacFn", 1)) return;
   
@@ -1169,7 +1190,6 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
   fflush(stdout);
 
   // Call CVODE for each radius
-  // Do/while loop to catch CVODE error test failure status
   do{
      for(i=1; i<NRADS; i++){
          cvstatus = CVode(cvode_mem, radii[i], P, &t, CV_NORMAL);
@@ -1180,67 +1200,98 @@ solveStatEq(struct grid *gp, molData *md, const int ispec, configInfo *par\
          }
        }
       
-      if(cvstatus==-3 && reltol > MINTOL){ // Reduce the tolerances and try again
-         retval = CVodeInit(cvode_mem, f,  radii[0], P);
-         if (check_retval(&retval, "CVodeInit", 1)) printf("Failed to reinitialize CVODE\n");
-         CVodeSetUserData(cvode_mem, &user_data);
-         CVodeSetMaxNumSteps(cvode_mem, 5000);
-         sunMatrix = SUNDenseMatrix(NEQ, NEQ);
-         LS = SUNLinSol_Dense(P, sunMatrix);
-         CVodeSetLinearSolver(cvode_mem, LS, sunMatrix);
-         CVodeSetJacFn(cvode_mem, NULL);
-         reduceTol(abstol, reltol, cvode_mem, 0.1, NEQ);
-         break;
-      }else if(cvstatus!=0){
-      cvodeErrs++;
-      printf("CVODE error %d (continuing to next timestep - check populations!!)\n",cvstatus);
+       /* IF SOLVER FAILS */
+       if(cvstatus < 0 && reltol > MINTOL) { 
+         
+         /* Reset Populations to initial values before restarting */
+         for(k=0; k < NEQ; ++k) Ith(P,k) = popGrid[0][k];
+         
+         /* TIER 1 FALLBACK: SWITCH TO DENSE SOLVER */
+         if (using_dense == 0) {
+             printf("WARNING: SPGMR failed (stiff system). Switching to Dense Direct Solver...\n");
+             using_dense = 1;
+             
+             if (LS != NULL) SUNLinSolFree(LS);
+             
+             retval = CVodeInit(cvode_mem, f, radii[0], P);
+             CVodeSetUserData(cvode_mem, &user_data);
+             CVodeSetMaxNumSteps(cvode_mem, 5000);
+             
+             sunMatrix = SUNDenseMatrix(NEQ, NEQ);
+             LS = SUNLinSol_Dense(P, sunMatrix);
+             CVodeSetLinearSolver(cvode_mem, LS, sunMatrix);
+             CVodeSetJacFn(cvode_mem, NULL); 
+             
+             break; /* Break spatial loop to restart integration */
+         } 
+         /* TIER 2 FALLBACK: DENSE SOLVER FAILED, REDUCE TOLERANCES */
+         else {
+             printf("WARNING: Dense solver failed. Reducing tolerances...\n");
+             
+             retval = CVodeInit(cvode_mem, f, radii[0], P);
+             CVodeSetUserData(cvode_mem, &user_data);
+             CVodeSetMaxNumSteps(cvode_mem, 5000);
+             
+             if (LS != NULL) SUNLinSolFree(LS);
+             if (sunMatrix != NULL) SUNMatDestroy(sunMatrix);
+             
+             sunMatrix = SUNDenseMatrix(NEQ, NEQ);
+             LS = SUNLinSol_Dense(P, sunMatrix);
+             CVodeSetLinearSolver(cvode_mem, LS, sunMatrix);
+             CVodeSetJacFn(cvode_mem, NULL);
+             
+             /* reduceTol now takes reltol by reference and updates it
+                correctly in place - no separate "reltol *= 0.1" needed. */
+             reduceTol(abstol, &reltol, cvode_mem, 0.1, NEQ);
+             
+             break; /* Break spatial loop to restart integration */
+         }
+      } 
+      else if (cvstatus > 0) {
+          cvodeErrs++;
+          printf("CVODE error %d (continuing to next timestep - check populations!!)\n",cvstatus);
       }
-    //Next CVODE step
-      if(cvodeErrs>=15){ 
+      
+      if(cvodeErrs >= 15){ 
          bail_out("CVODE solver failure - check physical model and tolerances.");
          exit(1);
       }
     }
-  }while(cvstatus==-3) ;
+  } while (cvstatus < 0 && reltol > MINTOL);
 
   fflush(stdout);
-  /*Interpolate the computed radial populations onto the Delaunay grid for raytracing*/ 
-  index=0;
+  
+  /* Interpolate the computed radial populations onto the Delaunay grid */ 
   for(i=0;i<subGrid_pIntensity;i++){
+     index = NRADS - 1; /* Default to outer boundary to prevent memory read violations */
      for(j=1;j<NRADS;j++){ 
         if(radii[j]>gp[i].radius){
            index = j;
            break;
         }
      }   
-    fflush(stdout);     
      for(k=0;k<md[ispec].nlev;k++){
         gp[i].mol[ispec].pops[k] = linear_interp(radii[index-1],radii[index],popGrid[index-1][k],popGrid[index][k],gp[i].radius); 
      }
   }
 
-  /* Free P and abstol vectors */
+  /* Free CVODE Vectors and Memory */
   N_VDestroy(P);
   N_VDestroy(abstol);
-
-  /* Free integrator memory */
   CVodeFree(&cvode_mem);
 
-  /* Free the linear solver memory */
-  SUNLinSolFree(LS);
-
-  /* Free the matrix memory */
-  SUNMatDestroy(sunMatrix);
+  /* Free the linear solver & matrix memory */
+  if (LS != NULL) SUNLinSolFree(LS);
+  if (sunMatrix != NULL) SUNMatDestroy(sunMatrix);
   
-  gsl_vector_free(newpop);
-  
+  /* Free cached arrays */
+  free(p_rates);
+  free(coll_rates);
   free(popGrid);
   
-  if (par->useEP==2)
-  free(jbar_grid);
-
+  if (local_par.useEP==2)
+    free(jbar_grid);
 }
-
 
 /*....................................................................*/
 int
@@ -1347,8 +1398,8 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
     printf("SolveStatEq: DONE\n");
     fflush(stdout);
 
-    for(id=0;id<par->pIntensity;id++){
-      totalNMaserWarnings = nMaserWarnings[id];
+    for(id=0;id<gp_pIntensity;id++){
+      totalNMaserWarnings += nMaserWarnings[id];
     }
 
     if(!silent && totalNMaserWarnings>0){
@@ -1357,12 +1408,12 @@ levelPops(molData *md, configInfo *par, struct grid *gp, int *popsdone, double *
     }
 
     if(!silent) warning("");
-    for (i=0;i<par->pIntensity;i++){
+    for (i=0;i<gp_pIntensity;i++){
       freeGridPointData(par->nSpecies, mp[i]);
       free(halfFirstDs[i]);
     }
 
-  if(par->useEP == 2) freeMolsWithBlends(blends.mols, blends.numMolsWithBlends);
+  freeMolsWithBlends(blends.mols, blends.numMolsWithBlends);
   for (i=0;i<par->pIntensity;i++)
     gsl_rng_free(threadRans[i]);
   free(threadRans);

@@ -74,6 +74,7 @@
 #define RTOL 1.0e-10   /* CVODE scalar relative tolerance */
 #define ATOL 1.0e-10   /* CVODE vector absolute tolerance components */
 #define MINTOL 1.0e-15 /*Minimum allowed value for RTOL and ATOL*/
+#define DENSE_NEQ_CUTOFF 300  /* Use Dense solver below this NEQ; Krylov (SPGMR) above it for better speed (as long as useEP is 0) */
 #define ICUTOFF 1.0e-02 /*Fraction of Gaussian line peak outside which to exclude wings during raytracing*/
 #define NRADS 300 /*Number of radial points for the CVODE integral*/
 #define SUBGRID1 -1 //Radius parity for conical jet   
